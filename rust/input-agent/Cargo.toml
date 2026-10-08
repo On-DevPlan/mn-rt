@@ -1,0 +1,51 @@
+[package]
+name = "input-agent"
+version = "0.1.0"
+edition = "2021"
+description = "RemoteType input agent: reads single-line JSON commands on stdin and injects text into the focused window via enigo."
+license = "MIT"
+
+[[bin]]
+name = "input-agent"
+path = "src/main.rs"
+
+[dependencies]
+# 注意：需求文档 V0.1 写的 enigo = "0.1.30" 在 crates.io 上并不存在
+# （0.1.x 系列最高 0.1.6），且 0.1.x 与 0.6.x 的 API 完全不同。
+# 本项目使用当前稳定版 0.6.1，详见 docs/ENIGO_FINDINGS.md。
+#
+# 平台特性说明：
+#   * Windows / macOS 无需任何 feature（enigo 自动按 target_os 选择后端）；
+#   * Linux 必须显式启用后端 feature，否则 enigo 会触发 compile_error!。
+#     这里在 CI 中通过 --features linux-x11 启用 x11rb。
+enigo = { version = "0.6.1", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[features]
+default = []
+# Linux X11 后端（RemoteType 唯一支持的 Linux 路径）
+linux-x11 = ["enigo/x11rb"]
+
+# 说明：enigo 的 wayland 后端在 0.6.1 中存在协议绑定竞态缺陷，
+# 即使对着正常运行的合成器也会构造失败（实测 weston 13）。
+# 故本项目不提供 wayland feature。详见 docs/ENIGO_FINDINGS.md。
+
+# ── 依赖补丁 ─────────────────────────────────────────────────────────
+# xkeysym 0.2.1 的 KEYSYMTAB 存在与 X11 规范冲突的条目（共 256 项），
+# 会把 CJK / 日文假名等字符映射成歧义的传统 keysym。
+# 其中最典型的是把「。」(U+3002) 映射为 0x04a1（日文假名句点），
+# 导致中文句号注入错误——这是中文写作里的高频字符。
+#
+# 本地 vendor 版本改为依据 X11 规范统一使用
+# `keysym = 0x01000000 + codepoint`，彻底消除该歧义。
+# 详见 rust/vendor/xkeysym/src/lib.rs 中标注【RemoteType 补丁】的段落。
+[patch.crates-io]
+xkeysym = { path = "../vendor/xkeysym" }
+
+[profile.release]
+opt-level = "z"   # 体积优先：语音输入是低频场景，无需极致性能
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

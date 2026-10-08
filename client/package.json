@@ -1,0 +1,50 @@
+{
+  "name": "remotetype",
+  "version": "0.1.0",
+  "description": "RemoteType PC 客户端：npx 一键启动，接收手机端语音识别文本并注入到当前焦点输入框",
+  "bin": {
+    "remotetype": "./bin/index.js"
+  },
+  "main": "lib/index.js",
+  "type": "commonjs",
+  "files": [
+    "bin/",
+    "lib/",
+    "binaries/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node bin/index.js serve",
+    "test:local": "node bin/index.js test \"本地注入测试\""
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "@remotetype/input-agent-win32-x64": "0.1.0",
+    "@remotetype/input-agent-darwin-x64": "0.1.0",
+    "@remotetype/input-agent-darwin-arm64": "0.1.0",
+    "@remotetype/input-agent-linux-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "remote",
+    "voice",
+    "asr",
+    "input",
+    "keyboard",
+    "automation"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,22 @@
+{
+  "name": "remotetype-server",
+  "version": "0.1.0",
+  "description": "RemoteType 公网 Serve 服务端：WebSocket 消息转发 + 转录记录持久化",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "bin": {
+    "remotetype-server": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "test:e2e": "node test/e2e.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
