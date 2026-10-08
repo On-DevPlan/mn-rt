@@ -102,10 +102,16 @@ function downloadBaseUrl() {
   );
 }
 
-/** 二进制下载地址：<base>/<platform>-<arch>/input-agent[.exe] */
+/**
+ * 二进制下载地址。
+ *
+ * GitHub Release 的资产是扁平的，无法保留目录层级，
+ * 因此名义为 `input-agent-<platform>-<arch>[.exe]`
+ * （与 build-input-agent.yml 中 release job 的命名保持一致）。
+ */
 function binaryUrl(target = resolveTarget()) {
-  const file = binaryName(target.platform);
-  return `${downloadBaseUrl()}/${target.key}/${file}`;
+  const ext = target.platform === 'win32' ? '.exe' : '';
+  return `${downloadBaseUrl()}/input-agent-${target.key}${ext}`;
 }
 
 module.exports = {

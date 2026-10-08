@@ -1,5 +1,8 @@
 # RemoteType — 远程语音转文字输入系统
 
+[![build-input-agent](https://github.com/ZHLX2005/mn-rt/actions/workflows/build-input-agent.yml/badge.svg)](https://github.com/ZHLX2005/mn-rt/actions/workflows/build-input-agent.yml)
+[![node-ci](https://github.com/ZHLX2005/mn-rt/actions/workflows/node-ci.yml/badge.svg)](https://github.com/ZHLX2005/mn-rt/actions/workflows/node-ci.yml)
+
 把手机上的语音识别结果，实时注入到电脑当前焦点输入框。
 
 ```
@@ -274,7 +277,34 @@ bash test/e2e.sh 2 6      # 只跑用例 2 和 6
 
 ### CI
 
-`.github/workflows/build-input-agent.yml` 在 4 个平台并行编译 Rust 二进制（win32-x64 / darwin-x64 / darwin-arm64 / linux-x64），产出 `SHA256SUMS`，并在 Linux 上跑冒烟测试（ping / 非法 JSON / 空输入）。打 tag 时自动发布到 GitHub Release。
+仓库 `mn-rt` 配有两个工作流：
+
+**`build-input-agent.yml`** — 4 平台并行编译 Rust 注入引擎（win32-x64 / darwin-x64 / darwin-arm64 / linux-x64），产出 `SHA256SUMS.txt`，并在 Linux 上跑冒烟测试（ping / 非法 JSON / 未知 action 后进程存活 / 空输入）。
+
+**`node-ci.yml`** — JS 侧检查：
+
+| job | 内容 |
+|---|---|
+| `server` | Node 20/22 语法检查 + `/health`、`/stats`、`/push` 启动冒烟 |
+| `client` | 3 平台 × Node 20/22，语法检查 + CLI 冒烟 + 25 项单元测试 |
+| `rust unit` | `cargo test` / `cargo fmt --check` / `cargo clippy -D warnings` |
+
+### 发布
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+打 tag 会触发 4 平台编译，并自动创建 GitHub Release、上传各平台产物。产物目录结构与 `client/lib/platform.js` 的查找路径一致，客户端可直接按 `binaryUrl()` 下载。
+
+发布后产物地址形如：
+
+```
+https://github.com/ZHLX2005/mn-rt/releases/download/v0.1.0/linux-x64/input-agent
+```
+
+可用 `REMOTETYPE_BINARY_BASE` 覆盖下载源，`REMOTETYPE_VERSION` 覆盖版本号。
 
 ---
 

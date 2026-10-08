@@ -201,10 +201,36 @@ jobs:
           done
           find dist -type f | sort
 
+      # GitHub Release 的资产是「扁平」的：不同平台若都叫 input-agent，
+      # 上传时会互相覆盖，最终只剩最后一个。因此统一加上平台前缀，
+      # 形如 input-agent-linux-x64 / input-agent-win32-x64.exe。
+      - name: 重命名为带平台前缀的产物
+        run: |
+          set -euo pipefail
+          mkdir -p upload
+          for d in win32-x64 darwin-x64 darwin-arm64 linux-x64; do
+            SRC="dist/input-agent-$d"
+            BIN=$(ls "$SRC" | grep -v SHA256SUMS | head -1)
+            EXT=""
+            [[ "$BIN" == *.exe ]] && EXT=".exe"
+            TGT="input-agent-$d$EXT"
+            cp "$SRC/$BIN" "upload/$TGT"
+            # 用新名字重算校验和，避免用户校验时对不上文件名
+            if command -v sha256sum >/dev/null 2>&1; then
+              ( cd upload && sha256sum "$TGT" >> SHA256SUMS-all.txt )
+            else
+              ( cd upload && shasum -a 256 "$TGT" >> SHA256SUMS-all.txt )
+            fi
+          done
+          echo "--- 待上传 ---"
+          ls -lh upload
+          echo "--- 校验和 ---"
+          cat upload/SHA256SUMS-all.txt
+
       - name: 创建 Release 并上传分平台产物
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**
+          files: upload/*
           generate_release_notes: true
           draft: false
           body: |
@@ -212,11 +238,15 @@ jobs:
 
             预编译的字符注入引擎（无需用户安装 Rust）。
 
-            | 平台 | 目录 | 说明 |
+            | 资产 | 平台 | 说明 |
             | --- | --- | --- |
-            | Windows x64 | `win32-x64/` | 需加入杀毒软件白名单 |
-            | macOS Intel | `darwin-x64/` | 需开启「辅助功能」权限 |
-            | macOS Apple Silicon | `darwin-arm64/` | 需开启「辅助功能」权限 |
-            | Linux x64 | `linux-x64/` | **仅支持 X11，Wayland 不支持** |
+            | `input-agent-win32-x64.exe` | Windows x64 | 需加入杀毒软件白名单 |
+            | `input-agent-darwin-x64` | macOS Intel | 需开启「辅助功能」权限 |
+            | `input-agent-darwin-arm64` | macOS Apple Silicon | 需开启「辅助功能」权限 |
+            | `input-agent-linux-x64` | Linux x64 | **仅支持 X11，Wayland 不支持** |
 
-            各目录内含 `SHA256SUMS.txt`，可用于校验下载完整性。
+            `SHA256SUMS-all.txt` 含全部资产的校验和，可用于验证下载完整性。
+
+            > 自行部署时，请把下载到的文件放为
+            > `<缓存目录>/<平台>-<架构>/input-agent[.exe]`，
+            > 或用 `remotetype serve --agent <路径>` 手动指定。

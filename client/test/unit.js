@@ -233,10 +233,16 @@ test('resolveTarget 归一化未知 arch 为 x64', () => {
   assert.strictEqual(platform.resolveTarget('linux', 'arm64').key, 'linux-arm64');
 });
 
-test('binaryUrl 指向 <base>/<key>/<binary>', () => {
-  const url = platform.binaryUrl({ platform: 'linux', arch: 'x64', key: 'linux-x64' });
-  assert.ok(url.startsWith('https://'), url);
-  assert.ok(url.endsWith('/linux-x64/input-agent'), url);
+test('binaryUrl 指向扁平命名 input-agent-<key>[.exe]', () => {
+  const linux = platform.binaryUrl({ platform: 'linux', arch: 'x64', key: 'linux-x64' });
+  assert.ok(linux.startsWith('https://'), linux);
+  assert.ok(linux.endsWith('/input-agent-linux-x64'), linux);
+
+  const win = platform.binaryUrl({ platform: 'win32', arch: 'x64', key: 'win32-x64' });
+  assert.ok(win.endsWith('/input-agent-win32-x64.exe'), win);
+
+  const mac = platform.binaryUrl({ platform: 'darwin', arch: 'arm64', key: 'darwin-arm64' });
+  assert.ok(mac.endsWith('/input-agent-darwin-arm64'), mac);
 });
 
 run().then(() => {
