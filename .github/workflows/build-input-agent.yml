@@ -140,21 +140,35 @@ jobs:
         run: |
           set -uo pipefail
           BIN="dist/${{ matrix.artifact }}/${{ matrix.binary }}"
-          # 1) ping 指令应返回 {"ok":true,"msg":"pong"}
+          # 注意：断言不要依赖 JSON 键顺序（serde 按字段声明顺序输出，
+          # 与直觉书写顺序可能不一致），统一用 grep 做结构化匹配。
+          # 1) ping 指令应返回 ok:true + msg:pong
           RESP=$(echo '{"action":"ping"}' | timeout 10 "$BIN" 2>/dev/null | head -1 || true)
           echo "ping 应答: $RESP"
-          if [ "$RESP" != '{"ok":true,"msg":"pong"}' ]; then
-            echo "::error::ping 协议应答不符合预期"
-            exit 1
-          fi
+          case "$RESP" in
+            *'"ok":true'*) : ;;
+            *) echo "::error::ping 应答缺少 ok:true"; exit 1 ;;
+          esac
+          case "$RESP" in
+            *'"pong"'*) : ;;
+            *) echo "::error::ping 应答缺少 pong"; exit 1 ;;
+          esac
           # 2) 非法 JSON 应返回 ok:false 且不崩溃
           RESP2=$(echo 'not-json' | timeout 10 "$BIN" 2>/dev/null | head -1 || true)
           echo "非法输入应答: $RESP2"
           case "$RESP2" in
-            '{"ok":false'*) echo "非法输入被正确拒绝" ;;
+            *'"ok":false'*) echo "非法输入被正确拒绝" ;;
             *) echo "::error::非法 JSON 处理异常"; exit 1 ;;
           esac
-          # 3) 空行应被忽略，进程正常退出
+          # 3) 未知 action 应返回 ok:false 且进程存活
+          RESP3=$(printf '{"action":"no_such_action"}\n{"action":"ping"}\n' \
+            | timeout 10 "$BIN" 2>/dev/null | tr '\n' ' ')
+          echo "未知 action 应答: $RESP3"
+          case "$RESP3" in
+            *'"ok":false'*'"pong"'*) echo "未知 action 被拒绝且进程继续服务" ;;
+            *) echo "::error::未知 action 处理异常"; exit 1 ;;
+          esac
+          # 4) 空行应被忽略，进程正常退出
           printf '\n\n' | timeout 10 "$BIN" >/dev/null 2>&1
           echo "空输入处理正常"
 

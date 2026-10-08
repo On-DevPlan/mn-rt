@@ -95,9 +95,10 @@ function cacheDir() {
 
 /** 二进制默认下载源（GitHub Releases）。可用环境变量覆盖。 */
 function downloadBaseUrl() {
+  const version = process.env.REMOTETYPE_VERSION || 'v0.1.0';
   return (
     process.env.REMOTETYPE_BINARY_BASE ||
-    'https://github.com/remotetype/remotetype/releases/download/v0.1.0'
+    `https://github.com/ZHLX2005/mn-rt/releases/download/${version}`
   );
 }
 
