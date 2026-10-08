@@ -1,0 +1,159 @@
+name: node-ci
+
+# mn-rt monorepo 的 JS 侧检查。
+# 覆盖两个包：
+#   server/  公网 Serve 服务端
+#   client/  PC 客户端 CLI
+#
+# 说明：client 的 optionalDependencies 指向各平台注入引擎分包（尚未发布到 npm），
+# 因此这里用 --omit=optional 安装，避免因缺失可选依赖而失败。
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/**'
+      - 'client/**'
+      - '.github/workflows/node-ci.yml'
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'client/**'
+      - '.github/workflows/node-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: server (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci --omit=optional
+
+      - name: 语法检查
+        run: |
+          for f in src/*.js; do
+            node --check "$f"
+            echo "OK $f"
+          done
+
+      - name: 启动冒烟测试（/health、/stats、/push 空文本拒绝）
+        run: |
+          set -euo pipefail
+          RT_PORT=18899 RT_RECORD_FILE=/tmp/records.jsonl RT_LOG_DIR=/tmp/logs \
+            node src/server.js >/tmp/server.log 2>&1 &
+          SRV=$!
+          trap 'kill $SRV 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:18899/health >/dev/null && break
+            sleep 0.5
+          done
+
+          echo "--- /health ---"
+          curl -sf http://127.0.0.1:18899/health | tee /dev/stderr | grep -q '"ok":true'
+
+          echo "--- /stats ---"
+          curl -sf http://127.0.0.1:18899/stats | tee /dev/stderr | grep -q 'records'
+
+          echo "--- /push 空文本应被拒绝 ---"
+          RESP=$(curl -s -X POST http://127.0.0.1:18899/push \
+            -H 'Content-Type: application/json' \
+            -d '{"clientId":"nobody","text":"   "}')
+          echo "$RESP"
+          echo "$RESP" | grep -q 'rejected_empty'
+
+          echo "--- /push 目标离线应告警 ---"
+          RESP2=$(curl -s -X POST http://127.0.0.1:18899/push \
+            -H 'Content-Type: application/json' \
+            -d '{"clientId":"nobody","text":"hello"}')
+          echo "$RESP2"
+          echo "$RESP2" | grep -q 'target_offline'
+
+          echo "服务端冒烟测试通过"
+
+  client:
+    name: client (Node ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['20', '22']
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci --omit=optional
+
+      - name: 语法检查
+        shell: bash
+        run: |
+          for f in bin/index.js lib/*.js; do
+            node --check "$f"
+            echo "OK $f"
+          done
+
+      - name: CLI 冒烟测试（help / doctor / binary）
+        shell: bash
+        run: |
+          set -uo pipefail
+          node bin/index.js help | grep -q 'serve'
+          node bin/index.js binary
+
+      - name: 单元测试（文本预处理 / 队列 / 平台识别）
+        shell: bash
+        run: node test/unit.js
+
+  unit:
+    name: rust unit
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev pkg-config
+
+      - name: cargo test
+        working-directory: rust/input-agent
+        run: cargo test --features linux-x11 --verbose
+
+      - name: cargo fmt 检查
+        working-directory: rust/input-agent
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: rust/input-agent
+        run: cargo clippy --features linux-x11 -- -D warnings

@@ -2,7 +2,11 @@ name: build-input-agent
 
 # 多平台编译 Rust 注入引擎，产出可直接分发的静态二进制。
 #
-# 产物目录结构（与客户端 lib/platform.js 的查找路径一致）：
+# mn-rt monorepo 说明：
+#   本仓库除 Rust 注入引擎外还含 server/（公网服务端）与 client/（PC 客户端 CLI）。
+#   两者由独立的 node-ci.yml 负责检查；本文件只关注 Rust 产物。
+#
+# 产物目录结构（与 client/lib/platform.js 的查找路径一致）：
 #   win32-x64/input-agent.exe
 #   darwin-x64/input-agent
 #   darwin-arm64/input-agent
@@ -10,18 +14,21 @@ name: build-input-agent
 #
 # 触发方式：
 #   * 打 tag（v*）时自动编译并创建 Release 并上传产物；
+#   * 修改 rust/ 或本文件时在 PR / main 上做编译校验；
 #   * 手动 workflow_dispatch 也可以只编译、留档 artifact。
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - 'rust/**'
+      - '.github/workflows/build-input-agent.yml'
     tags:
       - 'v*'
-    paths:
-      - 'rust/input-agent/**'
-      - '.github/workflows/build-input-agent.yml'
   pull_request:
     paths:
-      - 'rust/input-agent/**'
+      - 'rust/**'
       - '.github/workflows/build-input-agent.yml'
   workflow_dispatch:
 
@@ -33,7 +40,7 @@ env:
 
 jobs:
   build:
-    name: build ${{ matrix.target }}
+    name: build ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -45,7 +52,7 @@ jobs:
             artifact: win32-x64
             binary: input-agent.exe
             features: ""
-            cross: false
+            linux: false
 
           # ---- macOS x64（Intel） ----
           - os: macos-latest
@@ -53,7 +60,7 @@ jobs:
             artifact: darwin-x64
             binary: input-agent
             features: ""
-            cross: false
+            linux: false
 
           # ---- macOS arm64（Apple Silicon） ----
           - os: macos-latest
@@ -61,16 +68,17 @@ jobs:
             artifact: darwin-arm64
             binary: input-agent
             features: ""
-            cross: false
+            linux: false
 
           # ---- Linux x64（X11） ----
-          # 使用较旧的 glibc 基础镜像以提升兼容性（Ubuntu 20.04 → glibc 2.31）
-          - os: ubuntu-20.04
+          # ubuntu-22.04 → glibc 2.35。如需更低 glibc 兼容性，
+          # 可改为在 ubuntu-22.04 上使用 cross 或容器构建。
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: linux-x64
             binary: input-agent
             features: "--features linux-x11"
-            cross: false
+            linux: true
 
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +88,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # 注意：mn-rt 是 monorepo，工程根在 rust/input-agent，
+      # 而 wkeysym patch 指向 ../vendor/xkeysym，因此缓存键需覆盖两个 Cargo.toml。
       - name: 缓存 cargo
         uses: actions/cache@v4
         with:
@@ -89,13 +99,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             rust/input-agent/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('rust/input-agent/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('rust/input-agent/Cargo.toml', 'rust/vendor/xkeysym/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       # Linux 构建依赖：enigo 的 x11rb 后端需要 xkbcommon（X11 键位映射）
       - name: 安装 Linux 构建依赖
-        if: matrix.os == 'ubuntu-20.04'
+        if: matrix.linux
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev pkg-config
@@ -115,7 +125,7 @@ jobs:
           mkdir -p "$OUT"
           cp "$SRC" "$OUT/${{ matrix.binary }}"
           # 计算校验和，便于用户验证下载完整性
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          if [ "${{ runner.os }}" = "macOS" ]; then
             shasum -a 256 "$OUT/${{ matrix.binary }}" > "$OUT/SHA256SUMS.txt"
           else
             sha256sum "$OUT/${{ matrix.binary }}" > "$OUT/SHA256SUMS.txt"
@@ -125,7 +135,7 @@ jobs:
           cat "$OUT/SHA256SUMS.txt"
 
       - name: 冒烟测试（Linux：校验可执行 + 协议应答）
-        if: matrix.os == 'ubuntu-20.04'
+        if: matrix.linux
         shell: bash
         run: |
           set -uo pipefail
