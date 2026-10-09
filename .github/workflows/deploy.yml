@@ -52,7 +52,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: server
-          file: server/Dockerfile
+          file: Dockerfile
           push: true
           tags: |
             ${{ env.IMAGE_FULL }}:latest
@@ -79,7 +79,7 @@ jobs:
       # 把 GHCR pull 用的鉴权文件以 artifact 形式从 build 传到 deploy（ref1 坑 1：
       # job output 会被 secret-scanner 拦，artifact 文件不被扫值）
       - name: Write docker pull config
-        if: ${{ secrets.GHCR_TOKEN != '' }}
+        if: ${{ secrets.GHCR_TOKEN }}
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
@@ -89,7 +89,7 @@ jobs:
           echo "wrote docker_config.json ($(wc -c < docker_config.json) bytes)"
 
       - name: Upload docker config
-        if: ${{ secrets.GHCR_TOKEN != '' }}
+        if: ${{ secrets.GHCR_TOKEN }}
         uses: actions/upload-artifact@v4
         with:
           name: docker-config
@@ -97,7 +97,7 @@ jobs:
           retention-days: 1
 
       - name: Download docker config
-        if: ${{ secrets.GHCR_TOKEN != '' }}
+        if: ${{ secrets.GHCR_TOKEN }}
         uses: actions/download-artifact@v4
         with:
           name: docker-config
@@ -105,7 +105,7 @@ jobs:
           merge-multiple: true
 
       - name: Copy config to server
-        if: ${{ secrets.GHCR_TOKEN != '' }}
+        if: ${{ secrets.GHCR_TOKEN }}
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.HOST }}
