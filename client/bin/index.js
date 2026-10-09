@@ -226,6 +226,9 @@ async function cmdServe(cfg) {
   // 对齐模式会话（可选）；serve 在其后创建，sendAck 闭包引用
   let align = null;
   let serve;
+  // 本批按键计划中注入失败过的 seq：commit 到来时走 commitFailed
+  // （mirror 不推进、重试），而不是 commitApplied（误以为已注入 → 永久错位）
+  const failedAlignSeqs = new Set();
 
   // ---- 消息队列：串行消费，逐条注入 ----
   // serve 明文模式 item = {text, clientId}；对齐模式 item =
@@ -240,7 +243,12 @@ async function cmdServe(cfg) {
 
       // commit：本批按键计划完成，推进 mirror 并回 ACK（无注入动作）
       if (item.op === 'commit') {
-        align?.commitApplied(item.seq, item.text);
+        if (failedAlignSeqs.has(item.seq)) {
+          failedAlignSeqs.delete(item.seq);
+          align?.commitFailed(item.seq);
+        } else {
+          align?.commitApplied(item.seq, item.text);
+        }
         return;
       }
 
@@ -253,10 +261,12 @@ async function cmdServe(cfg) {
             store.append({ status: 'backspaced', count: item.count, source: meta.source, seq: item.seq });
           } else {
             logger.error('退格失败', { count: item.count, msg: res?.msg });
+            if (item.seq !== undefined) failedAlignSeqs.add(item.seq);
             store.append({ status: 'backspace_failed', count: item.count, errorMsg: res?.msg ?? 'unknown', source: meta.source, seq: item.seq });
           }
         } catch (e) {
           logger.error('退格异常', { count: item.count, error: e.message });
+          if (item.seq !== undefined) failedAlignSeqs.add(item.seq);
           store.append({ status: 'backspace_failed', count: item.count, errorMsg: e.message, source: meta.source, seq: item.seq });
         }
         return;
@@ -267,6 +277,7 @@ async function cmdServe(cfg) {
       const cleaned = sanitize(item.text, { maxLength: cfg.maxTextLength });
       if (!cleaned.ok) {
         logger.warn('文本预处理后丢弃', { reason: cleaned.reason, clientId: item.clientId });
+        if (meta.source === 'align' && item.seq !== undefined) failedAlignSeqs.add(item.seq);
         store.append({
           text: item.text,
           status: 'dropped',
@@ -308,6 +319,7 @@ async function cmdServe(cfg) {
           });
         } else {
           logger.error('注入失败', { msg: res?.msg, durationMs });
+          if (meta.source === 'align' && item.seq !== undefined) failedAlignSeqs.add(item.seq);
           store.append({
             text: cleaned.text,
             status: 'inject_failed',
@@ -321,6 +333,7 @@ async function cmdServe(cfg) {
       } catch (e) {
         const durationMs = Date.now() - startedAt;
         logger.error('注入异常', { error: e.message, durationMs });
+        if (meta.source === 'align' && item.seq !== undefined) failedAlignSeqs.add(item.seq);
         store.append({
           text: cleaned.text,
           status: 'inject_failed',

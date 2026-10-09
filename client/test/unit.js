@@ -322,18 +322,45 @@ test('diff：FlowType 用例集（追加/改尾/删 emoji/组合字符不破坏�
   assert.deepStrictEqual(planTransition('Cafe\u{301}', 'Cafe\u{301} 好'), { backspaces: 0, insert: ' 好' });
 });
 
-test('diff：中段编辑只回删中段（后缀优化）', () => {
-  assert.deepStrictEqual(planTransition('ABCDE', 'ABXDE'), { backspaces: 1, insert: 'X' });
-  assert.deepStrictEqual(planTransition('前缀[旧]后缀', '前缀[新]后缀'), { backspaces: 1, insert: '新' });
+test('diff：中段编辑回删到共同前缀重打（光标在末尾语义，禁用后缀优化）', () => {
+  // 后缀保尾必须先左移光标才正确，而注入原语没有光标左移——
+  // 曾因后缀优化把中段改动打到文本末尾（屏幕 'abcd'→期望 'abd' 实得 'abc'）
+  assert.deepStrictEqual(planTransition('ABCDE', 'ABXDE'), { backspaces: 3, insert: 'XDE' });
+  assert.deepStrictEqual(planTransition('前缀[旧]后缀', '前缀[新]后缀'), { backspaces: 4, insert: '新]后缀' });
+  assert.deepStrictEqual(planTransition('abcd', 'abd'), { backspaces: 2, insert: 'd' });
+  assert.deepStrictEqual(planTransition('hello world', 'hello brave world'), {
+    backspaces: 5,
+    insert: 'brave world',
+  });
 });
 
-test('diff：清空 / 从空开始 / 无变化 / 后缀重叠边界', () => {
+test('diff：清空 / 从空开始 / 无变化 / 长度增减边界', () => {
   assert.deepStrictEqual(planTransition('你好世界', ''), { backspaces: 4, insert: '' });
   assert.deepStrictEqual(planTransition('', '你好'), { backspaces: 0, insert: '你好' });
   assert.deepStrictEqual(planTransition('same', 'same'), { backspaces: 0, insert: '' });
-  // 重叠防护：prefix+suffix 不得越过短文本长度
   assert.deepStrictEqual(planTransition('aaa', 'aaaa'), { backspaces: 0, insert: 'a' });
   assert.deepStrictEqual(planTransition('aaaa', 'aaa'), { backspaces: 1, insert: '' });
+});
+
+// 计划自洽性：任一 transition 按注入语义模拟执行后必须精确落在 current
+test('diff：计划自洽（backspace+type 模拟执行必达 current）', () => {
+  const cases = [
+    ['abc', 'ab'],
+    ['你好世界', '你好世'],
+    ['abcd', 'abd'],
+    ['今天天气很好', '今天气很好'],
+    ['hello world', 'hello brave world'],
+    ['ABC', 'ABCD'],
+    ['前缀[旧]后缀', '前缀[新]后缀'],
+    [' completely different ', '完全不同'],
+    ['', '从头输入'],
+    ['全部删掉', ''],
+  ];
+  for (const [prev, cur] of cases) {
+    const plan = planTransition(prev, cur);
+    const applied = graphemes(prev).slice(0, graphemes(prev).length - plan.backspaces).join('') + plan.insert;
+    assert.strictEqual(applied, cur, `'${prev}' → '${cur}' 计划执行后不落位`);
+  }
 });
 
 // ================= RtAlignSession 状态机（纯逻辑，不连网） =================
@@ -396,15 +423,50 @@ test('align：解密全文 → 产出 backspace/type/commit 计划', () => {
   assert.strictEqual(ops[0].count, 2);
 });
 
-test('align：中段编辑一次落位（后缀优化贯通到计划层）', () => {
+test('align：中段编辑回删到共同前缀重打（贯通到计划层）', () => {
   const { align, ops } = newTestAlign(vectors.input_key);
   align.handleIncoming(sealedSync(align, '前缀[旧]后缀', 1));
   align.commitApplied(1, '前缀[旧]后缀');
   ops.length = 0;
   align.handleIncoming(sealedSync(align, '前缀[新]后缀', 2));
   assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'type', 'commit']);
+  assert.strictEqual(ops[0].count, 4);
+  assert.strictEqual(ops[1].text, '新]后缀');
+});
+
+test('align：注入失败走 commitFailed——mirror 不推进，重试后挂起，新快照自愈', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好', 1));
+  align.commitApplied(1, '你好');
+  ops.length = 0;
+
+  // 删字计划注入失败：mirror 必须停在 '你好'，且立即重试产出相同计划
+  assert.strictEqual(align.handleIncoming(sealedSync(align, '你', 2)), 'envelope');
+  assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'commit']);
   assert.strictEqual(ops[0].count, 1);
-  assert.strictEqual(ops[1].text, '新');
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    ops.length = 0;
+    align.commitFailed(2);
+    assert.strictEqual(align.mirror, '你好');
+    assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'commit'], `retry #${attempt}`);
+  }
+
+  // 超过重试上限：挂起，不再产出计划（避免坏 agent 场景打满队列）
+  ops.length = 0;
+  align.commitFailed(2);
+  assert.deepStrictEqual(ops, []);
+  assert.strictEqual(align.busy, false);
+
+  // 下一条快照恢复：pendingFails 归零，按真实 mirror 重新 diff
+  ops.length = 0;
+  assert.strictEqual(align.handleIncoming(sealedSync(align, '你', 3)), 'envelope');
+  assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'commit']);
+  assert.strictEqual(ops[0].count, 1);
+
+  // 成功路径归零：commitApplied 后重试计数复位
+  align.commitApplied(3, '你');
+  assert.strictEqual(align.pendingFails, 0);
 });
 
 test('align：busy 期间 coalescing，commit 后对最新全文续跑', () => {
@@ -431,7 +493,7 @@ test('align：重复 seq 忽略；sid 更换后 seq 域重置', () => {
   // 旧 seq 重放：忽略
   assert.strictEqual(align.handleIncoming(sealedSync(align, '你好!', 5)), 'duplicate');
   assert.deepStrictEqual(ops, []);
-  // 手机重启：新 sid、seq 从 1 重新开始（与旧文本无公共前后缀 → 回删后重打）
+  // 手机重启：新 sid、seq 从 1 重新开始（与旧文本无公共前缀 → 回删后重打）
   align.handleIncoming(sealedSync(align, '新会话', 1, 's2'));
   assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'type', 'commit']);
   assert.strictEqual(ops[0].count, 2);

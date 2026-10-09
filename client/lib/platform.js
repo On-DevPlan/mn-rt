@@ -93,9 +93,18 @@ function cacheDir() {
   return path.join(base, 'binaries');
 }
 
+/** 包自身版本 → 默认 Release tag（发版时 package.json 与 git tag 同步 bump）。 */
+function packageVersion() {
+  try {
+    return require('../package.json').version;
+  } catch {
+    return '0.0.0';
+  }
+}
+
 /** 二进制默认下载源（GitHub Releases）。可用环境变量覆盖。 */
 function downloadBaseUrl() {
-  const version = process.env.REMOTETYPE_VERSION || 'v0.1.0';
+  const version = process.env.REMOTETYPE_VERSION || `v${packageVersion()}`;
   return (
     process.env.REMOTETYPE_BINARY_BASE ||
     `https://github.com/ZHLX2005/mn-rt/releases/download/${version}`

@@ -30,6 +30,9 @@ const { planTransition } = require('./rt-diff');
 const DIR_P2C = 'p2c';
 const DIR_C2P = 'c2p';
 
+/** 同一批按键计划注入失败后的立即重试上限（超过则挂起等下一条快照） */
+const PLAN_RETRIES = 3;
+
 /** 判断一段 text 是否形如 RT1 信封（直连模式区分加密/明文流量用）。 */
 function looksLikeEnvelope(text) {
   if (typeof text !== 'string') return false;
@@ -72,6 +75,7 @@ class RtAlignSession extends EventEmitter {
     this.phoneId = '';         // 最近一次解密信封里的手机路由标识
     this.busy = false;         // 按键计划已发出、未 commit
     this.busySince = 0;
+    this.pendingFails = 0;     // 当前 desired 连续注入失败次数（成功 commit 或新快照归零）
     this.ackSeq = 0;
     this.sid = crypto.randomBytes(4).toString('hex');
 
@@ -143,6 +147,7 @@ class RtAlignSession extends EventEmitter {
     this.phoneId = typeof plain.phoneId === 'string' ? plain.phoneId : '';
     this.desiredText = plain.text;
     this.desiredSeq = seq;
+    this.pendingFails = 0; // 新快照 = 新的尝试机会
     this._dispatch();
     return 'envelope';
   }
@@ -182,8 +187,32 @@ class RtAlignSession extends EventEmitter {
     this.mirror = text;
     this.busy = false;
     this.busySince = 0;
+    this.pendingFails = 0;
     this._sendAck(seq);
     if (this.desiredText !== this.mirror) this._dispatch();
+  }
+
+  /**
+   * 上层报告本批按键注入失败（如 rust agent 拒绝 backspace）。
+   * mirror 必须保持不动——它代表屏幕真实状态，假推进会造成永久错位。
+   * 立即重试至多 PLAN_RETRIES 次（agent 可能只是瞬时故障），超过后挂起，
+   * 等下一条快照到来时按真实 mirror 重新 diff 自愈。
+   */
+  commitFailed(seq) {
+    if (!this.busy) return;
+    this.busy = false;
+    this.busySince = 0;
+    this.pendingFails += 1;
+    if (this.pendingFails <= PLAN_RETRIES) {
+      this.logger?.warn('按键计划注入失败，重试', { seq, attempt: this.pendingFails });
+      this._dispatch();
+      return;
+    }
+    this.logger?.error('按键计划连续注入失败，挂起等待下一条快照', {
+      seq,
+      attempts: this.pendingFails,
+    });
+    this.emit('plan-stalled', { seq, attempts: this.pendingFails });
   }
 
   _sendAck(appliedSeq) {
