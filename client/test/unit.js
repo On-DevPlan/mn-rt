@@ -17,6 +17,7 @@ const path = require('path');
 const { sanitize, isInvisible, DEFAULT_MAX_LENGTH } = require('../lib/sanitize');
 const { MessageQueue } = require('../lib/queue');
 const platform = require('../lib/platform');
+const { parseArgs } = require('../lib/config');
 
 let pass = 0;
 let fail = 0;
@@ -44,6 +45,14 @@ async function run() {
 }
 
 console.log('\n== sanitize：文本预处理 ==');
+
+test('config：CLI 多词参数归一化为驼峰（--client-id → flags.clientId）', () => {
+  const { flags } = parseArgs(['--client-id', 'pc-x', '--log-level', 'debug', '--align', '--key=MYKEY']);
+  assert.strictEqual(flags.clientId, 'pc-x');
+  assert.strictEqual(flags.logLevel, 'debug');
+  assert.strictEqual(flags.align, true);
+  assert.strictEqual(flags.key, 'MYKEY');
+});
 
 test('普通中文原样保留', () => {
   const r = sanitize('你好世界');

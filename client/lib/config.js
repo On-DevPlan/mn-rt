@@ -67,7 +67,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg.startsWith('--')) {
-      const [key, inline] = arg.slice(2).split('=');
+      const [rawKey, inline] = arg.slice(2).split('=');
+      // --client-id → clientId：loadConfig 按驼峰读取，
+      // 曾因不做映射导致所有多词参数（--client-id/--log-level/…）静默失效
+      const key = rawKey.replace(/-([a-zA-Z])/g, (_, c) => c.toUpperCase());
       if (inline !== undefined) {
         flags[key] = inline;
       } else {
