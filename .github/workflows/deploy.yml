@@ -60,6 +60,8 @@ jobs:
           target: "~/app/"
           strip_components: 0
           timeout: 30m
+          # command_timeout 控制 scp 传输总时长；跨境外网（GHA→华为云）实测 60MB 需 30+ 分钟
+          command_timeout: 30m
 
       - name: Deploy on server
         uses: appleboy/ssh-action@v1.0.3
@@ -78,9 +80,10 @@ jobs:
             APP_DIR="$HOME/app"
             cd "$APP_DIR"
 
-            # docker load 对损坏 tarball 会静默失败，必须 inspect 防止跑的是旧镜像
+            # docker load 对损坏 tarball 会静默失败，必须 inspect 防止跑的是旧镜像。
+            # 镜像 tarball 是 gzip 过的——先解压再 load（buildkit 不自动识别 gzip 流）。
             test -s app.tar.gz || { echo "MISSING app.tar.gz"; exit 1; }
-            docker load < app.tar.gz
+            gunzip -c app.tar.gz | docker load
             docker image inspect "${IMAGE_NAME}:latest" > /dev/null \
               || { echo "load failed — image tag missing"; exit 1; }
             rm -f app.tar.gz
