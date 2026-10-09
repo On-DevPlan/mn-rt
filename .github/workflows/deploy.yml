@@ -68,12 +68,21 @@ jobs:
           PKG_NAME: mn-rt/rt-server
         run: |
           set -e
-          curl -sf -X PATCH \
+          # 用临时文件捕响应（不要 pipe head 吞掉 status code）
+          HTTP=$(curl -s -o /tmp/vis_resp.json -w "%{http_code}" \
+            -X PATCH \
             -H "Authorization: token $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/orgs/${ORG}/packages/container/${PKG_NAME}/visibilities" \
-            -d '{"visibility":"public"}' | head -c 200
+            -d '{"visibility":"public"}')
+          echo "PATCH status: $HTTP"
+          echo "response body:"
+          cat /tmp/vis_resp.json | head -c 400
           echo
+          if [ "$HTTP" != "200" ]; then
+            echo "::error::visibility PATCH failed (status $HTTP)"
+            exit 1
+          fi
           echo "package visibility set to public"
 
       # 4 个 secret 长度诊断，任一没配/配错第一时间在日志里看到
