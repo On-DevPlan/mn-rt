@@ -23,7 +23,8 @@ on:
 env:
   REGISTRY: ghcr.io
   # 镜像完整名：workflow 级 env 不支持 ${{ env.X }} 自引用，直接写死
-  IMAGE_FULL: ghcr.io/On-DevPlan/mn-rt/rt-server
+  # GHCR 要求 owner 全小写
+  IMAGE_FULL: ghcr.io/on-devplan/mn-rt/rt-server
 
 jobs:
   build-push-deploy:
