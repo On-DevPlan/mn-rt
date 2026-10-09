@@ -22,10 +22,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_OWNER: On-DevPlan
-  IMAGE_REPO: mn-rt
-  IMAGE_NAME: rt-server
-  IMAGE_FULL: ghcr.io/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_REPO }}/${{ env.IMAGE_NAME }}
+  # 镜像完整名：workflow 级 env 不支持 ${{ env.X }} 自引用，直接写死
+  IMAGE_FULL: ghcr.io/On-DevPlan/mn-rt/rt-server
 
 jobs:
   build-push-deploy:
