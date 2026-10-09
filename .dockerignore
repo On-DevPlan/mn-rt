@@ -1,0 +1,21 @@
+# 根 .dockerignore：build context=repo 根 时屏蔽噪声文件
+# 不需要的子目录（按需精确排除）
+client/binaries/
+client/node_modules/
+rust/target/
+rust/vendor/
+data/
+logs/
+test/
+docs/
+.claude/
+.github/
+
+# 顶层杂项
+.git/
+.gitignore
+*.md
+!server/DEPLOY.md
+!README.md
+.dockerignore
+.editorconfig
