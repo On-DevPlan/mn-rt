@@ -59,15 +59,23 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Push 后立即把包设为 public——避免 GHCR visibility 同步怪象导致
-      # 公开包匿名 pull 仍 401；用 packages:write 权限调 PATCH 显式设公开。
+      # Push 后尽量把包设为 public——避免 GHCR visibility 同步怪象导致
+      # 公开包匿名 pull 仍 401。
+      #
+      # ⚠️ 已知限制：该 PATCH 对「组织所有」的 package 恒返回 404。
+      # GitHub 官方 troubleshooting 明确：GITHUB_TOKEN 只能操作 workflow 所属
+      # 「仓库」的资源；组织级 package 属资源需 PAT（classic write:packages
+      # 或 fine-grained Packages: write）。URL 与 %2F 编码本身没问题。
+      #
+      # 服务器侧已改为带 GHCR_TOKEN 鉴权 pull，不依赖包是否 public。
+      # 因此这里失败只告警、不阻断部署（continue-on-error + 不 exit 1）。
       - name: Make package public
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ORG: On-DevPlan
           PKG_NAME: mn-rt/rt-server
         run: |
-          set -e
           # 路径是 /orgs/{org}/packages/{type}/{name}（不是 /visibilities 后缀），
           # 名字里的 '/' 需 URL-encode 成 %2F
           PKG_ENC=$(printf '%s' "$PKG_NAME" | sed 's|/|%2F|g')
@@ -78,16 +86,16 @@ jobs:
             -H "Authorization: token $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "$URL" \
-            -d '{"visibility":"public"}')
+            -d '{"visibility":"public"}' || echo "000")
           echo "PATCH status: $HTTP"
           echo "response body:"
-          cat /tmp/vis_resp.json | head -c 400
+          head -c 400 /tmp/vis_resp.json 2>/dev/null || true
           echo
           if [ "$HTTP" != "200" ]; then
-            echo "::error::visibility PATCH failed (status $HTTP)"
-            exit 1
+            echo "::warning::visibility PATCH 未成功 (status $HTTP)——不阻断部署，服务器将用 GHCR_TOKEN 鉴权 pull"
+          else
+            echo "package visibility set to public"
           fi
-          echo "package visibility set to public"
 
       # 4 个 secret 长度诊断，任一没配/配错第一时间在日志里看到
       - name: Diagnose secrets (length only)
