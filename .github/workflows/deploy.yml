@@ -116,40 +116,39 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         env:
           RT_TOKEN: ${{ secrets.RT_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || '' }}
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.PORT || 22 }}
-          envs: RT_TOKEN
+          envs: RT_TOKEN,GHCR_TOKEN
           timeout: 30s
           command_timeout: 30m
           script: |
             set -e
             cd ~/app
 
-            # 仅当 runner 端写了 docker_config.json 时才安装
-            if [ -s docker_config.json ]; then
+            # GHCR_TOKEN 非空才装认证 config；空则匿名 pull（公开包 OK）
+            if [ -n "$GHCR_TOKEN" ] && [ -s docker_config.json ]; then
               mkdir -p ~/.docker
               mv -f docker_config.json ~/.docker/config.json
               chmod 600 ~/.docker/config.json
               echo "docker pull config installed (authenticated)"
             else
-              echo "docker pull config: 缺 GHCR_TOKEN，匿名 pull（公开包 OK，私有/同步延迟场景会 401）"
+              rm -f docker_config.json  # 避免被误以为已装
+              echo "docker pull: GHCR_TOKEN 未配，匿名 pull（公开包 OK）"
             fi
 
             IMAGE="${{ env.IMAGE_FULL }}:latest"
             CONTAINER_NAME=remotetype_server
             HOST_PORT=8790
 
-            # pull 包在 12min 内：ref1 坑 3（GHCR 慢网络兜底），
-            # 超时也不阻断 deploy，本地缓存能用就用（GHCR 公开包亦然）
             echo "Pulling ${IMAGE}..."
             timeout 720 docker pull "${IMAGE}" \
               && echo "pull ok" \
               || echo "WARN: pull failed/timeout (fallback to local cache)"
 
-            # 镜像必须存在（刚 pull 成功 or 之前缓存）
             docker image inspect "${IMAGE}" > /dev/null \
               || { echo "no image at all（pull 失败且无缓存）"; exit 1; }
 
