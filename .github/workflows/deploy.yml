@@ -23,8 +23,10 @@ on:
 env:
   REGISTRY: ghcr.io
   # 镜像完整名：workflow 级 env 不支持 ${{ env.X }} 自引用，直接写死
-  # GHCR 要求 owner 全小写
-  IMAGE_FULL: ghcr.io/on-devplan/mn-rt/rt-server
+  # 用 joke-lx user namespace 而非 on-devplan org：
+  # org 包存在 GHCR visibility 同步怪象（公开包匿名 pull 仍 401），
+  # user namespace 包默认 public、匿名可拉。GHCR_TOKEN 可不配。
+  IMAGE_FULL: ghcr.io/joke-lx/mn-rt-rt-server
 
 jobs:
   build-push-deploy:
