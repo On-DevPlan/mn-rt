@@ -39,7 +39,10 @@ PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经�
 npx remotetype serve --align
 npx remotetype serve --align --key MYKEY123     # 两端用同一个 key
 
-# 手机：fr app → Lab → 远程输入（联机）→ 填服务器地址 + key → 连接电脑
+# 手机方式一（免装 app）：浏览器直接打开 http://<server>:8790/
+#   网页控制台已内置 RT1 实时同步——输入/删除实时对齐，无发送按钮；
+#   非加密上下文（http）里浏览器语音不可用，用输入法自带语音键即可
+# 手机方式二：fr app → Lab → 远程输入（联机）→ 填服务器地址 + key → 连接电脑
 # 服务器：同原模式（node server/src/server.js），建议同时设置 RT_TOKEN 注册门禁
 #   设了 RT_TOKEN 后，PC 端须携带同一 token（--token 或环境变量 REMOTETYPE_TOKEN / RT_TOKEN）：
 npx remotetype serve --align --token SECRET
@@ -73,10 +76,13 @@ npx remotetype serve --align --token SECRET
 ```
 remotetype/
 ├── server/                     # 公网 Serve 服务端
-│   └── src/
-│       ├── server.js           # WS 路由 + HTTP 测试接口
-│       ├── logger.js           # 分级日志（debug/info/warn/error）
-│       └── store.js            # jsonlines 转录记录持久化
+│   ├── src/
+│   │   ├── server.js           # WS 路由 + HTTP 测试接口 + 网页控制台托管
+│   │   ├── logger.js           # 分级日志（debug/info/warn/error）
+│   │   └── store.js            # jsonlines 转录记录持久化
+│   └── public/                 # 网页控制台（RT1 实时同步客户端，免装 app）
+│       ├── index.html          # 输入/删除实时对齐，无发送按钮
+│       └── rt1-core.js         # RT1 WebCrypto 实现（与 Node/Dart 三方向量对拍）
 ├── client/                     # PC 客户端（npm 包）
 │   ├── bin/index.js            # CLI 入口（serve / test / doctor / binary）
 │   ├── lib/

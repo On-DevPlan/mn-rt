@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="dark light">
 <meta name="theme-color" content="#0b110d" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#eef1ea" media="(prefers-color-scheme: light)">
-<title>RemoteType 控制台</title>
+<title>RemoteType 实时同步</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b110d'/%3E%3Cpath d='M8 20v4M16 10v14M24 14v10' stroke='%2353e08c' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -63,7 +63,6 @@
     touch-action: manipulation;
   }
 
-  /* ---------- 头部 ---------- */
   .top {
     display: flex; align-items: center; justify-content: space-between;
     padding-bottom: 12px; border-bottom: 1px solid var(--line-strong);
@@ -82,9 +81,9 @@
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
   .chip.on .dot { background: var(--acc); box-shadow: 0 0 7px var(--acc); }
   .chip.off .dot { background: var(--red); animation: blink 1.1s steps(2) infinite; }
+  .chip.secure .dot { background: var(--acc); box-shadow: 0 0 7px var(--acc); }
   @keyframes blink { 50% { opacity: .25; } }
 
-  /* ---------- 分区 ---------- */
   main { max-width: 560px; margin: 0 auto; }
   .sec {
     margin-top: 18px; border: 1px solid var(--line); border-radius: 12px;
@@ -95,20 +94,22 @@
   .sec:nth-of-type(2) { animation-delay: .07s; }
   .sec:nth-of-type(3) { animation-delay: .14s; }
   @keyframes rise { from { opacity: 0; transform: translateY(10px); } }
+  .sec[hidden] { display: none; }
 
   .sechead { display: flex; align-items: baseline; gap: 9px; margin-bottom: 11px; }
   .no { font-family: var(--mono); font-size: 11px; color: var(--acc); letter-spacing: .1em; }
   .sechead h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .12em; color: var(--dim); }
   .sechead .spacer { flex: 1; }
 
-  /* ---------- 目标选择 ---------- */
-  .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
-  .tab {
-    font-family: var(--mono); font-size: 12px; letter-spacing: .06em;
-    color: var(--dim); background: none; border: 1px solid var(--line);
-    border-radius: 8px; padding: 5px 12px; cursor: pointer;
+  .grid { display: grid; gap: 10px; }
+  input.mono {
+    width: 100%; font-family: var(--mono); font-size: 16px; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; outline: none;
   }
-  .tab.active { color: var(--acc); border-color: var(--acc); background: transparent; }
+  input.mono:focus { border-color: var(--acc); }
+  input.mono::placeholder { color: var(--faint); }
+
   .pclist { display: grid; gap: 8px; }
   .pc {
     display: flex; align-items: center; gap: 10px; text-align: left; width: 100%;
@@ -124,39 +125,31 @@
   }
   .pc .cid { font-size: 13px; word-break: break-all; }
   .pc .meta { margin-left: auto; font-size: 11px; color: var(--faint); flex: none; }
-  .pc.flash { animation: flash .6s; }
-  @keyframes flash { 0% { border-color: var(--acc); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 25%, transparent); } }
-
-  .empty {
-    margin: 0; padding: 14px 4px 2px; color: var(--faint); font-size: 13px;
-  }
+  .empty { margin: 0; padding: 14px 4px 2px; color: var(--faint); font-size: 13px; }
   .empty code { font-family: var(--mono); font-size: 12px; color: var(--dim); }
-  input.mono {
-    width: 100%; font-family: var(--mono); font-size: 16px; color: var(--ink);
-    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
-    padding: 10px 12px; outline: none;
-  }
-  input.mono:focus { border-color: var(--acc); }
 
-  /* ---------- 内容 ---------- */
+  .go {
+    width: 100%; border-radius: 10px; cursor: pointer; font-family: var(--mono);
+    font-size: 15px; letter-spacing: .2em; font-weight: 700;
+    background: var(--acc); border: 1px solid var(--acc); color: var(--acc-ink);
+    padding: 13px 0 14px; transition: transform .06s, opacity .15s;
+  }
+  .go:active { transform: scale(.985); }
+  .go:disabled { opacity: .45; cursor: default; }
+
   .payloadwrap { position: relative; }
   textarea {
     width: 100%; resize: none; display: block;
     font-family: var(--mono); font-size: 16px; line-height: 1.6;
     color: var(--ink); background: var(--bg);
     border: 1px solid var(--line); border-radius: 10px;
-    padding: 11px 12px 12px; outline: none; min-height: 96px;
+    padding: 11px 12px 12px; outline: none; min-height: 180px;
   }
   textarea:focus { border-color: var(--acc); }
   textarea::placeholder, input.mono::placeholder { color: var(--faint); }
-  .interim {
-    margin-top: 8px; font-family: var(--mono); font-size: 13px; color: var(--dim);
-    padding: 0 4px; min-height: 1.2em;
-  }
-  .interim::before { content: "◉ "; color: var(--red); }
 
-  .actions { display: flex; gap: 10px; margin-top: 12px; }
-  .mic, .send {
+  .actions { display: flex; gap: 10px; margin-top: 12px; align-items: center; }
+  .mic, .clear {
     border-radius: 10px; cursor: pointer; font-family: var(--mono);
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   }
@@ -169,16 +162,20 @@
     0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 45%, transparent); }
     100% { box-shadow: 0 0 0 12px transparent; }
   }
-  .send {
-    flex: 1; font-size: 15px; letter-spacing: .2em; font-weight: 700;
-    background: var(--acc); border: 1px solid var(--acc); color: var(--acc-ink);
-    padding: 13px 0 14px; transition: transform .06s, opacity .15s;
+  .clear {
+    flex: 1; font-size: 13px; letter-spacing: .12em; font-weight: 600;
+    background: var(--bg); border: 1px solid var(--line); color: var(--dim);
+    padding: 11px 0 12px;
   }
-  .send:active { transform: scale(.985); }
-  .send:disabled { opacity: .45; cursor: default; }
+  .clear:active { color: var(--acc); border-color: var(--acc); }
+  .syncmeta {
+    font-family: var(--mono); font-size: 11px; color: var(--faint); flex: none;
+    text-align: right; line-height: 1.4;
+  }
+  .syncmeta b { color: var(--dim); font-weight: 600; }
   .hint { margin: 8px 2px 0; font-size: 12px; color: var(--faint); min-height: 1.2em; }
+  .hint b { color: var(--dim); font-weight: 600; }
 
-  /* ---------- 日志 ---------- */
   .log { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
   .log li {
     display: flex; align-items: baseline; gap: 9px;
@@ -203,7 +200,6 @@
   }
   .ghost:active { color: var(--acc); }
 
-  /* ---------- toast ---------- */
   .toast {
     position: fixed; left: 50%; bottom: max(22px, env(safe-area-inset-bottom));
     transform: translateX(-50%);
@@ -222,331 +218,388 @@
 
 <header class="top">
   <div class="wordmark">REMOTE<span>TYPE</span></div>
-  <div class="chip" id="srvChip"><i class="dot"></i><span id="srvText">连接中</span></div>
+  <div class="chip" id="chip"><i class="dot"></i><span id="chipText">未连接</span></div>
 </header>
 
 <main>
-  <!-- 01 目标 -->
-  <section class="sec">
+  <!-- 01 连接 -->
+  <section class="sec" id="secConn">
     <div class="sechead">
-      <span class="no">01</span><h2>目标 PC</h2><span class="spacer"></span>
-      <button class="ghost" id="refreshBtn">↻ 刷新</button>
+      <span class="no">01</span><h2>连接电脑</h2><span class="spacer"></span>
+      <button class="ghost" id="refreshBtn">↻ 刷新在线</button>
     </div>
-    <div class="tabs" role="tablist">
-      <button class="tab active" data-tab="list" role="tab">在线列表</button>
-      <button class="tab" data-tab="manual" role="tab">手动指定</button>
+    <div class="grid">
+      <input class="mono" id="keyInput" placeholder="配对 key（电脑端 serve --align 打印）" autocomplete="off" spellcheck="false">
+      <input class="mono" id="tokenInput" placeholder="访问 token（可选，服务器设 RT_TOKEN 时填）" autocomplete="off" spellcheck="false">
+      <input class="mono" id="serverInput" placeholder="服务器地址" autocomplete="off" spellcheck="false">
     </div>
-    <div id="paneList">
-      <div class="pclist" id="pcList"></div>
-      <p class="empty" id="pcEmpty" hidden>暂无 PC 上线 —— 在电脑上运行 <code>npx remotetype serve</code></p>
+    <div class="pclist" id="pcList" style="margin-top:10px"></div>
+    <p class="empty" id="pcEmpty" hidden>暂无 PC 上线 —— 在电脑上运行 <code>npx remotetype serve --align</code></p>
+    <div style="margin-top:12px">
+      <button class="go" id="goBtn">实时同步连接</button>
     </div>
-    <div id="paneManual" hidden>
-      <input class="mono" id="manualId" placeholder="clientId，如 laptop-xxxxxxxx" autocomplete="off" spellcheck="false">
-    </div>
+    <p class="hint" id="connHint"></p>
   </section>
 
-  <!-- 02 内容 -->
-  <section class="sec">
+  <!-- 02 实时同步 -->
+  <section class="sec" id="secSync" hidden>
     <div class="sechead">
-      <span class="no">02</span><h2>内容</h2><span class="spacer"></span>
-      <span class="no" id="charCount" style="color:var(--faint)">0 字</span>
+      <span class="no">02</span><h2>实时同步</h2><span class="spacer"></span>
+      <span class="no" id="e2eMark" style="color:var(--faint)">等待电脑确认</span>
+      <button class="ghost" id="discBtn">断开</button>
     </div>
     <div class="payloadwrap">
-      <textarea id="payload" rows="3" placeholder="输入要注入到 PC 焦点窗口的文字…" autocomplete="off" spellcheck="false"></textarea>
-      <div class="interim" id="interim" hidden></div>
+      <textarea id="payload" rows="6" placeholder="在这里打字、删除、或用输入法的语音键说话 —— 内容与电脑焦点输入框实时对齐" autocomplete="off" spellcheck="false"></textarea>
     </div>
     <div class="actions">
-      <button class="mic" id="micBtn" title="语音输入">🎙</button>
-      <button class="send" id="sendBtn">发送 →</button>
+      <button class="mic" id="micBtn" hidden title="浏览器语音识别">🎙</button>
+      <button class="clear" id="clearBtn">清空</button>
+      <div class="syncmeta">
+        <div>已同步 <b id="sentCount">0</b> 次</div>
+        <div>电脑确认 <b id="ackCount">0</b></div>
+      </div>
     </div>
-    <p class="hint" id="micHint"></p>
+    <p class="hint" id="syncHint">
+      <b>无需点发送</b>：输入与删除实时同步；推荐用输入法自带的语音键（Gboard / 讯飞 / 搜狗麦克风）直接说话。
+    </p>
   </section>
 
   <!-- 03 日志 -->
-  <section class="sec">
+  <section class="sec" id="secLog">
     <div class="sechead">
-      <span class="no">03</span><h2>传输日志</h2><span class="spacer"></span>
-      <button class="ghost" id="clearLog">清空</button>
+      <span class="no">03</span><h2>日志</h2><span class="spacer"></span>
+      <button class="ghost" id="clearLogBtn">清空日志</button>
     </div>
     <ul class="log" id="log"></ul>
-    <p class="empty" id="logEmpty">暂无记录</p>
   </section>
 </main>
 
-<div class="toast" id="toast" hidden></div>
-
+<script src="/rt1-core.js"></script>
 <script>
-'use strict';
 (function () {
-  var $ = function (id) { return document.getElementById(id); };
-  var STATUS_TEXT = {
-    forwarded: '已转发',
-    target_offline: '目标离线',
-    rejected_empty: '空文本',
-    send_failed: '发送失败'
-  };
-  var MAX_LOG = 10;
-  var entries = [];
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const chip = $('chip'), chipText = $('chipText');
+  const KEY_STORE = 'rt-session';
 
-  // ---------- toast ----------
-  var toastTimer = null;
-  function toast(msg, isErr) {
-    var el = $('toast');
-    el.textContent = msg;
-    el.classList.toggle('err', Boolean(isErr));
-    el.hidden = false;
+  let derived = null;      // RT1 派生材料
+  let ws = null;
+  let target = null;       // 目标 PC clientId
+  let phoneId = RT1.randomHex(8);
+  const sid = RT1.randomHex(4);
+  let seq = 0;
+  let backoff = 1000;
+  let reconnectTimer = null;
+  let closedByUser = false;
+  let composing = false;   // IME 合成中挂起
+  let debounceTimer = null;
+  let sentCount = 0, ackCount = 0;
+  let lastAckSeq = 0;
+  let e2eOk = false;
+
+  // ---------- 基础 UI ----------
+  function setChip(mode, text) {
+    chip.className = 'chip' + (mode ? ' ' + mode : '');
+    chipText.textContent = text;
+  }
+  function log(tag, cls, text) {
+    const li = document.createElement('li');
+    const t = document.createElement('span'); t.className = 't';
+    t.textContent = new Date().toTimeString().slice(0, 8);
+    const b = document.createElement('span'); b.className = 'b ' + cls; b.textContent = tag;
+    const x = document.createElement('span'); x.className = 'x'; x.textContent = text;
+    li.append(t, b, x);
+    const logEl = $('log');
+    logEl.prepend(li);
+    while (logEl.children.length > 30) logEl.removeChild(logEl.lastChild);
+  }
+  let toastTimer = null;
+  function toast(text, isErr) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (isErr ? ' err' : '');
+    el.textContent = text;
+    document.body.appendChild(el);
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.hidden = true; }, 2600);
+    toastTimer = setTimeout(() => el.remove(), 2600);
   }
 
-  // ---------- 服务状态 / 在线列表轮询 ----------
-  var onlineIds = [];
-
-  function renderChip(ok) {
-    $('srvChip').classList.toggle('on', ok);
-    $('srvChip').classList.toggle('off', !ok);
-    $('srvText').textContent = ok ? '服务在线' : '服务离线';
+  // ---------- 会话记忆（sessionStorage：关标签即清，不当持久存储） ----------
+  function saveSession() {
+    try {
+      sessionStorage.setItem(KEY_STORE, JSON.stringify({
+        key: $('keyInput').value, token: $('tokenInput').value,
+        server: $('serverInput').value, target,
+      }));
+    } catch (_) { /* 隐私模式等 */ }
+  }
+  function loadSession() {
+    try { return JSON.parse(sessionStorage.getItem(KEY_STORE) || '{}'); } catch { return {}; }
   }
 
-  function renderClients(clients) {
-    onlineIds = clients.map(function (c) { return c.clientId; });
-    var wrap = $('pcList');
-    wrap.textContent = '';
-    $('pcEmpty').hidden = onlineIds.length > 0;
-    var selected = localStorage.getItem('rt.target') || '';
-
-    onlineIds.forEach(function (id) {
-      var btn = document.createElement('button');
-      btn.className = 'pc';
-      btn.type = 'button';
-      btn.setAttribute('aria-pressed', String(id === selected));
-
-      var radio = document.createElement('i');
-      radio.className = 'radio';
-      var cid = document.createElement('span');
-      cid.className = 'cid';
-      cid.textContent = id;
-      var meta = document.createElement('span');
-      meta.className = 'meta';
-      meta.textContent = '在线';
-
-      btn.append(radio, cid, meta);
-      btn.addEventListener('click', function () {
-        localStorage.setItem('rt.target', id);
-        renderClients(clients);
-      });
-      wrap.appendChild(btn);
+  // ---------- 在线 PC 列表 ----------
+  let onlineClients = [];
+  async function refreshClients() {
+    const base = serverBase();
+    if (!base) return;
+    try {
+      const r = await fetch(base + '/clients');
+      const body = await r.json();
+      onlineClients = (body.clients || []).map((c) => c.clientId).filter(Boolean);
+    } catch (_) {
+      onlineClients = [];
+    }
+    renderPcList();
+  }
+  function renderPcList() {
+    const wrap = $('pcList');
+    wrap.innerHTML = '';
+    onlineClients.forEach((cid) => {
+      const b = document.createElement('button');
+      b.className = 'pc'; b.type = 'button';
+      b.setAttribute('aria-pressed', String(cid === target));
+      const radio = document.createElement('i'); radio.className = 'radio';
+      const name = document.createElement('span'); name.className = 'cid'; name.textContent = cid;
+      const meta = document.createElement('span'); meta.className = 'meta'; meta.textContent = '在线';
+      b.append(radio, name, meta);
+      b.addEventListener('click', () => { target = cid; renderPcList(); });
+      wrap.appendChild(b);
     });
+    $('pcEmpty').hidden = onlineClients.length > 0;
+  }
+  function serverBase() {
+    const v = $('serverInput').value.trim().replace(/\/+$/, '');
+    return v || (location.protocol.startsWith('http') ? location.origin : '');
   }
 
-  function poll() {
-    Promise.allSettled([
-      fetch('/health').then(function (r) { return r.json(); }),
-      fetch('/clients').then(function (r) { return r.json(); })
-    ]).then(function (rs) {
-      renderChip(rs[0].status === 'fulfilled' && rs[0].value.ok === true);
-      if (rs[1].status === 'fulfilled' && Array.isArray(rs[1].value.clients)) {
-        renderClients(rs[1].value.clients);
-      }
-    });
-  }
-
-  $('refreshBtn').addEventListener('click', function () { poll(); toast('已刷新'); });
-  poll();
-  setInterval(poll, 3000);
-
-  // ---------- tab 切换 ----------
-  var activeTab = localStorage.getItem('rt.tab') || 'list';
-  function applyTab() {
-    document.querySelectorAll('.tab').forEach(function (t) {
-      t.classList.toggle('active', t.dataset.tab === activeTab);
-    });
-    $('paneList').hidden = activeTab !== 'list';
-    $('paneManual').hidden = activeTab !== 'manual';
-    localStorage.setItem('rt.tab', activeTab);
-  }
-  document.querySelectorAll('.tab').forEach(function (t) {
-    t.addEventListener('click', function () { activeTab = t.dataset.tab; applyTab(); });
-  });
-  applyTab();
-  $('manualId').value = localStorage.getItem('rt.manual') || '';
-  $('manualId').addEventListener('input', function () {
-    localStorage.setItem('rt.manual', this.value);
-  });
-
-  function effectiveTarget() {
-    if (activeTab === 'manual') return $('manualId').value.trim();
-    return localStorage.getItem('rt.target') || '';
-  }
-
-  // ---------- 输入 ----------
-  var payload = $('payload');
-  payload.addEventListener('input', function () {
-    $('charCount').textContent = payload.value.length + ' 字';
-    autoGrow();
-  });
-  function autoGrow() {
-    payload.style.height = 'auto';
-    payload.style.height = Math.max(96, payload.scrollHeight) + 'px';
-  }
-  payload.addEventListener('keydown', function (e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') send();
-  });
-
-  // ---------- 发送 ----------
-  function currentClock() {
-    return new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  }
-
-  function renderLog() {
-    var ul = $('log');
-    ul.textContent = '';
-    $('logEmpty').hidden = entries.length > 0;
-    entries.forEach(function (en) {
-      var li = document.createElement('li');
-      var t = document.createElement('span');
-      t.className = 't';
-      t.textContent = en.time;
-      var b = document.createElement('span');
-      b.className = 'b ' + en.cls;
-      b.textContent = en.status;
-      var x = document.createElement('span');
-      x.className = 'x';
-      x.textContent = en.preview + ' · ' + en.target;
-      li.append(t, b, x);
-      ul.appendChild(li);
-    });
-  }
-
-  function send() {
-    var text = payload.value;
-    var target = effectiveTarget();
-    if (!target) { toast('请先选择目标 PC（或手动指定 clientId）', true); return; }
-    if (!text.trim()) { toast('内容为空', true); return; }
-
-    var btn = $('sendBtn');
-    btn.disabled = true;
-    fetch('/push', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId: target, text: text })
-    }).then(function (r) {
-      return r.json().catch(function () { throw new Error('HTTP ' + r.status); });
-    }).then(function (res) {
-      var ok = res.ok === true;
-      entries.unshift({
-        time: currentClock(),
-        cls: ok ? 'ok' : 'err',
-        status: STATUS_TEXT[res.status] || res.status || '未知',
-        preview: text.length > 18 ? text.slice(0, 18) + '…' : text,
-        target: target
-      });
-      entries = entries.slice(0, MAX_LOG);
-      renderLog();
-      if (ok) {
-        payload.value = '';
-        $('charCount').textContent = '0 字';
-        autoGrow();
-        toast('已转发 → ' + target);
-      } else {
-        toast(STATUS_TEXT[res.status] || res.status || '发送失败', true);
-      }
-    }).catch(function (e) {
-      entries.unshift({
-        time: currentClock(), cls: 'err', status: '网络错误',
-        preview: text.slice(0, 18), target: target
-      });
-      entries = entries.slice(0, MAX_LOG);
-      renderLog();
-      toast('网络错误：' + e.message, true);
-    }).finally(function () {
-      btn.disabled = false;
-    });
-  }
-  $('sendBtn').addEventListener('click', send);
-  $('clearLog').addEventListener('click', function () {
-    entries = [];
-    renderLog();
-  });
-
-  // ---------- 语音输入（Web Speech API，需 HTTPS / localhost） ----------
-  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  var rec = null;
-  var listening = false;
-  var micHint = $('micHint');
-
-  function hint(msg) { micHint.textContent = msg || ''; }
-
-  if (!SR) {
-    hint('此浏览器不支持语音识别，可直接输入文字');
-  } else if (!window.isSecureContext) {
-    hint('语音识别需 HTTPS 环境（当前为 http），可先直接输入文字');
-  }
-
-  function stopRec() {
-    listening = false;
-    $('micBtn').classList.remove('live');
-    $('interim').hidden = true;
-    if (rec) { try { rec.stop(); } catch (e) { /* ignore */ } }
-  }
-
-  function appendFinal(text) {
-    if (!text) return;
-    payload.value += text;
-    payload.dispatchEvent(new Event('input'));
-    payload.focus();
-  }
-
-  $('micBtn').addEventListener('click', function () {
-    if (!SR) { toast('此浏览器不支持语音识别', true); return; }
-    if (!window.isSecureContext) {
-      toast('语音识别需要 HTTPS，当前 http 连接不支持', true);
+  // ---------- 连接 ----------
+  async function connect() {
+    const key = $('keyInput').value.trim();
+    if (!key) { toast('请输入配对 key', true); return; }
+    if (!target) {
+      await refreshClients();
+      if (onlineClients.length === 1) target = onlineClients[0];
+      if (!target) { toast('未选择目标 PC（先刷新在线列表或确认电脑已启动 serve --align）', true); return; }
+    }
+    saveSession();
+    $('goBtn').disabled = true; $('goBtn').textContent = '派生密钥…';
+    try {
+      derived = await RT1.deriveFromKey(key);
+    } catch (e) {
+      $('goBtn').disabled = false; $('goBtn').textContent = '实时同步连接';
+      toast('key 派生失败：' + e.message, true);
       return;
     }
-    if (listening) { stopRec(); return; }
+    log('KEY', 'ok', `已派生（AAD 标签 ${derived.room}）`);
+    $('goBtn').textContent = '连接服务器…';
+    openWs();
+  }
 
+  function openWs() {
+    const base = serverBase();
+    if (!base) { toast('缺少服务器地址', true); resetGo(); return; }
+    const url = base.replace(/^http/, 'ws') + '/ws';
+    try { ws = new WebSocket(url); } catch (e) { toast('连接失败：' + e.message, true); resetGo(); return; }
+
+    ws.onopen = () => {
+      backoff = 1000;
+      const token = $('tokenInput').value.trim();
+      ws.send(JSON.stringify({
+        type: 'register', role: 'phone', phoneId,
+        token: token || undefined,
+      }));
+    };
+    ws.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.type === 'registered') {
+        setChip('on', '已连接 · ' + target);
+        log('REG', 'ok', `目标 ${m.clientId || target} / phoneId ${m.phoneId || phoneId}`);
+        showSync();
+      } else if (m.type === 'ack') {
+        handleAck(m.ack);
+      } else if (m.type === 'error') {
+        if (/token/.test(m.error || '')) {
+          log('AUTH', 'err', '服务器开启了 RT_TOKEN，请在连接页填写同一 token');
+          toast('需要访问 token：请在连接页填写服务器 RT_TOKEN 对应的值', true);
+          disconnect(true);
+        } else {
+          log('ERR', 'err', m.error || 'unknown');
+        }
+      }
+    };
+    ws.onclose = (ev) => {
+      ws = null;
+      if (closedByUser) return;
+      if (ev.code === 4403) {
+        setChip('off', 'token 被拒');
+        log('AUTH', 'err', '注册被 4403 拒绝（token 缺失或错误）');
+        disconnect(true);
+        return;
+      }
+      setChip('off', '重连中');
+      scheduleReconnect();
+    };
+    ws.onerror = () => { /* close 必然跟随 */ };
+  }
+
+  function scheduleReconnect() {
+    if (closedByUser || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!closedByUser && !ws) openWs();
+    }, backoff);
+    backoff = Math.min(backoff * 2, 10000);
+  }
+
+  function resetGo() {
+    $('goBtn').disabled = false; $('goBtn').textContent = '实时同步连接';
+  }
+
+  function showSync() {
+    $('secConn').hidden = true;
+    $('secSync').hidden = false;
+    $('payload').focus();
+    if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+      $('micBtn').hidden = false;
+    } else {
+      $('syncHint').innerHTML =
+        '<b>无需点发送</b>：输入与删除实时同步。本页面非 HTTPS，浏览器语音不可用——' +
+        '请用<b>输入法自带的语音键</b>（Gboard / 讯飞 / 搜狗麦克风）直接说话，效果相同。';
+    }
+  }
+
+  function disconnect(backToConfig) {
+    closedByUser = true;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    try { if (ws) ws.close(1000, 'user'); } catch (_) { /* ignore */ }
+    ws = null;
+    setChip('', '未连接');
+    if (backToConfig) {
+      $('secSync').hidden = true;
+      $('secConn').hidden = false;
+      resetGo();
+    }
+  }
+
+  // ---------- 实时同步（无发送键） ----------
+  function onInputChanged() {
+    $('sentCount') && updateCount();
+    if (composing) return;            // IME 合成中挂起，合成结束再发
+    scheduleSync();
+  }
+  function scheduleSync() {
+    if (!derived || !ws || ws.readyState !== 1) return;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(syncNow, 250);
+  }
+  async function syncNow() {
+    if (!derived || !ws || ws.readyState !== 1) return;
+    seq += 1;
+    const text = $('payload').value;
+    const envelope = await RT1.seal(
+      derived.keyPhoneToPc,
+      RT1.buildAad(derived.room, RT1.DIR_P2C, seq),
+      { text, ts: Date.now(), phoneId },
+      { sid, seq },
+    );
+    ws.send(JSON.stringify({ clientId: target, text: JSON.stringify(envelope) }));
+    sentCount += 1;
+    updateCount();
+  }
+  async function handleAck(ackEnvelope) {
+    if (!derived || !ackEnvelope || !ackEnvelope.ct) return;
+    const ackSeq = Number(ackEnvelope.seq) || 0;
+    if (ackSeq <= lastAckSeq) return;
+    lastAckSeq = ackSeq;
+    try {
+      const plain = await RT1.open(
+        derived.keyPcToPhone,
+        RT1.buildAad(derived.room, RT1.DIR_C2P, ackSeq),
+        ackEnvelope,
+      );
+      ackCount += 1;
+      $('ackCount').textContent = String(ackCount);
+      $('ackCount').title = 'applied_seq=' + plain.applied_seq;
+      if (!e2eOk) {
+        e2eOk = true;
+        setChip('secure', '端到端 🔒');
+        $('e2eMark').textContent = '🔒 端到端已建立';
+        $('e2eMark').style.color = 'var(--acc)';
+        log('E2E', 'ok', '电脑确认收到并注入（ACK 可解密）');
+      }
+    } catch (_) {
+      log('ACK', 'err', 'ACK 解密失败（两端 key 不一致？）');
+    }
+  }
+  function updateCount() {
+    $('sentCount').textContent = String(sentCount);
+  }
+
+  // ---------- 事件绑定 ----------
+  $('goBtn').addEventListener('click', connect);
+  $('keyInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+  $('refreshBtn').addEventListener('click', () => { refreshClients(); });
+  $('discBtn').addEventListener('click', () => { disconnect(true); });
+  $('clearLogBtn').addEventListener('click', () => { $('log').innerHTML = ''; });
+
+  const payload = $('payload');
+  payload.addEventListener('input', onInputChanged);
+  // IME 合成：合成中挂起，结束立即补发（拼音中间态不上传）
+  payload.addEventListener('compositionstart', () => { composing = true; });
+  payload.addEventListener('compositionend', () => { composing = false; onInputChanged(); scheduleSync(); });
+
+  $('clearBtn').addEventListener('click', () => {
+    payload.value = '';
+    onInputChanged();
+    payload.focus();
+  });
+
+  // 浏览器语音识别（仅 HTTPS/localhost 可用；http 页面自动隐藏，靠输入法语音键）
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let rec = null;
+  let recBase = '';
+  $('micBtn').addEventListener('click', () => {
+    if (!SR) return;
+    if (rec) { rec.stop(); return; }
     rec = new SR();
     rec.lang = 'zh-CN';
     rec.continuous = true;
     rec.interimResults = true;
-
-    rec.onresult = function (ev) {
-      var interim = '';
-      for (var i = ev.resultIndex; i < ev.results.length; i++) {
-        var r = ev.results[i];
-        if (r.isFinal) appendFinal(r[0].transcript.trim());
+    recBase = payload.value;
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i += 1) {
+        const r = e.results[i];
+        if (r.isFinal) recBase += r[0].transcript;
         else interim += r[0].transcript;
       }
-      var box = $('interim');
-      box.hidden = !interim;
-      box.textContent = interim;
+      payload.value = recBase + interim;
+      onInputChanged();
     };
-    rec.onerror = function (ev) {
-      var msg = {
-        'not-allowed': '麦克风权限被拒绝',
-        'service-not-allowed': '语音服务不可用（可能缺少 Google 服务）',
-        'network': '语音服务网络错误',
-        'no-speech': '未检测到语音'
-      }[ev.error] || ('识别出错：' + ev.error);
-      toast(msg, true);
-      stopRec();
-    };
-    rec.onend = function () {
-      if (listening) { try { rec.start(); } catch (e) { stopRec(); } }
-      else { $('micBtn').classList.remove('live'); $('interim').hidden = true; }
-    };
-
-    try {
-      rec.start();
-      listening = true;
-      $('micBtn').classList.add('live');
-      hint('聆听中，点击麦克风停止；识别结果会填入输入框，可修改后再发送');
-    } catch (e) {
-      toast('无法启动语音识别：' + e.message, true);
-    }
+    rec.onend = () => { rec = null; $('micBtn').classList.remove('live'); recBase = payload.value; };
+    rec.onerror = () => { rec = null; $('micBtn').classList.remove('live'); };
+    rec.start();
+    $('micBtn').classList.add('live');
   });
 
-  renderLog();
+  // ---------- 启动 ----------
+  (function init() {
+    if (!location.protocol.startsWith('http')) {
+      $('serverInput').placeholder = '服务器地址（如 http://1.2.3.4:8790）';
+    } else {
+      $('serverInput').value = location.origin;
+      $('serverInput').readOnly = true;
+      $('serverInput').title = '本页由服务器托管，地址即当前源';
+    }
+    const saved = loadSession();
+    if (saved.key) $('keyInput').value = saved.key;
+    if (saved.token) $('tokenInput').value = saved.token;
+    if (saved.server && !$('serverInput').value) $('serverInput').value = saved.server;
+    target = saved.target || null;
+    refreshClients();
+    // 已有完整会话记忆时自动重连（刷新页面不掉线）
+    if (saved.key && target) connect();
+  })();
 })();
 </script>
 </body>

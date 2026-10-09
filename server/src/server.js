@@ -20,10 +20,18 @@
  */
 
 const http = require('http');
+const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const { Logger } = require('./logger');
 const { RecordStore } = require('./store');
+
+/** 网页控制台静态文件白名单（相对 server/public，防目录穿越只放行清单内文件）。 */
+const STATIC_FILES = {
+  '/': { file: 'index.html', type: 'text/html; charset=utf-8' },
+  '/index.html': { file: 'index.html', type: 'text/html; charset=utf-8' },
+  '/rt1-core.js': { file: 'rt1-core.js', type: 'text/javascript; charset=utf-8' },
+};
 
 /**
  * 解析配置：默认值 + 环境变量 + 命令行参数。
@@ -155,6 +163,18 @@ function createServer(userConfig = {}) {
         }
       });
       return undefined;
+    }
+
+    // 网页控制台静态文件（GET / 直接用浏览器当手机端，免装 app）
+    if (req.method === 'GET' && STATIC_FILES[url.pathname]) {
+      const entry = STATIC_FILES[url.pathname];
+      const file = path.join(__dirname, '..', 'public', entry.file);
+      try {
+        const body = fs.readFileSync(file);
+        return res.writeHead(200, { 'Content-Type': entry.type, 'Content-Length': body.length }).end(body);
+      } catch (_) {
+        return send(500, { ok: false, error: 'static file missing' });
+      }
     }
 
     return send(404, { ok: false, error: 'not found' });
