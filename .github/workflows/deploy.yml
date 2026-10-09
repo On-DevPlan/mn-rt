@@ -1,11 +1,14 @@
-# Deploy — 自包含派（无 registry）：build → docker save → scp → 服务器 load → run
+# Deploy — GHCR 派：runner build+push ghcr.io → 服务器 pull。
+#
+# 对比 ref4（save→scp→load）省了 30+ 分钟 GHA→服务器跨境外网传镜像。
+# 镜像走 GHCR（服务器 0.5s 通），scp 只传一个 ~250 字节的 docker 配置。
 #
 # 服务器档案 / secrets 配置 / 运维命令：见 server/DEPLOY.md
-# 触发：push 到 main 且动了 server/** 或本文件；或手动 dispatch（也用于回滚旧 commit）
 #
-# Secrets：
-#   HOST / USERNAME / PORT / SSH_KEY   —— 部署机 SSH（SSH_KEY = ~/.ssh/mn_rt_deploy 私钥全文）
-#   RT_TOKEN（可选）                    —— 注册门禁；未配置则服务无门禁运行
+# Secrets:
+#   HOST / USERNAME / PORT / SSH_KEY —— 部署机 SSH（与 ref4 共用）
+#   GHCR_TOKEN（推荐）—— PAT，read:packages；服务器 pull 鉴权用
+#   RT_TOKEN（可选）—— 注册门禁
 
 name: Deploy
 
@@ -18,24 +21,46 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: remotetype-server
-  CONTAINER_NAME: remotetype_server
-  HOST_PORT: 8790
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: On-DevPlan
+  IMAGE_REPO: mn-rt
+  IMAGE_NAME: rt-server
+  IMAGE_FULL: ghcr.io/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_REPO }}/${{ env.IMAGE_NAME }}
 
 jobs:
-  deploy:
+  build-push-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t "${IMAGE_NAME}:latest" server/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Save Docker image
-        run: docker save "${IMAGE_NAME}:latest" | gzip > app.tar.gz
+      - name: Log in to GHCR (push side)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 任一 secret 没配长度都是 0，build/scp 失败也能一眼看出是凭据问题
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          file: server/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_FULL }}:latest
+            ${{ env.IMAGE_FULL }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 4 个 secret 长度诊断，任一没配/配错第一时间在日志里看到
       - name: Diagnose secrets (length only)
         if: always()
         env:
@@ -43,27 +68,55 @@ jobs:
           USERNAME_LEN: ${{ secrets.USERNAME }}
           SSH_KEY_LEN:  ${{ secrets.SSH_KEY }}
           PORT_LEN:     ${{ secrets.PORT }}
+          GHCR_TOKEN_LEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           echo "HOST length: ${#HOST_LEN}"
           echo "USERNAME length: ${#USERNAME_LEN}"
           echo "SSH_KEY length: ${#SSH_KEY_LEN}"
           echo "PORT length: ${#PORT_LEN}"
+          echo "GHCR_TOKEN length: ${#GHCR_TOKEN_LEN} (0=未配，服务器将走匿名 pull，可能 401)"
 
-      - name: Copy image to server
+      # 把 GHCR pull 用的鉴权文件以 artifact 形式从 build 传到 deploy（ref1 坑 1：
+      # job output 会被 secret-scanner 拦，artifact 文件不被扫值）
+      - name: Write docker pull config
+        if: ${{ secrets.GHCR_TOKEN != '' }}
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -e
+          AUTH_B64=$(printf 'oauth2:%s' "$GHCR_TOKEN" | base64 -w0)
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > docker_config.json
+          echo "wrote docker_config.json ($(wc -c < docker_config.json) bytes)"
+
+      - name: Upload docker config
+        if: ${{ secrets.GHCR_TOKEN != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-config
+          path: docker_config.json
+          retention-days: 1
+
+      - name: Download docker config
+        if: ${{ secrets.GHCR_TOKEN != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-config
+          path: .
+          merge-multiple: true
+
+      - name: Copy config to server
+        if: ${{ secrets.GHCR_TOKEN != '' }}
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.PORT || 22 }}
-          source: "app.tar.gz"
+          source: "docker_config.json"
           target: "~/app/"
-          strip_components: 0
-          timeout: 30m
-          # command_timeout 控制 scp 传输总时长；跨境外网（GHA→华为云）实测 60MB 需 30+ 分钟
-          command_timeout: 30m
+          timeout: 2m
 
-      - name: Deploy on server
+      - name: Pull image and restart
         uses: appleboy/ssh-action@v1.0.3
         env:
           RT_TOKEN: ${{ secrets.RT_TOKEN }}
@@ -74,55 +127,64 @@ jobs:
           port: ${{ secrets.PORT || 22 }}
           envs: RT_TOKEN
           timeout: 30s
-          command_timeout: 15m
+          command_timeout: 30m
           script: |
             set -e
-            APP_DIR="$HOME/app"
-            cd "$APP_DIR"
+            cd ~/app
 
-            # docker load 对损坏 tarball 会静默失败，必须 inspect 防止跑的是旧镜像。
-            # 镜像 tarball 是 gzip 过的——先解压再 load（buildkit 不自动识别 gzip 流）。
-            test -s app.tar.gz || { echo "MISSING app.tar.gz"; exit 1; }
-            gunzip -c app.tar.gz | docker load
-            docker image inspect "${IMAGE_NAME}:latest" > /dev/null \
-              || { echo "load failed — image tag missing"; exit 1; }
-            rm -f app.tar.gz
+            # 仅当 runner 端写了 docker_config.json 时才安装
+            if [ -s docker_config.json ]; then
+              mkdir -p ~/.docker
+              mv -f docker_config.json ~/.docker/config.json
+              chmod 600 ~/.docker/config.json
+              echo "docker pull config installed (authenticated)"
+            else
+              echo "docker pull config: 缺 GHCR_TOKEN，匿名 pull（公开包 OK，私有/同步延迟场景会 401）"
+            fi
 
-            docker stop "$CONTAINER_NAME" 2>/dev/null || true
-            docker rm   "$CONTAINER_NAME" 2>/dev/null || true
+            IMAGE="${{ env.IMAGE_FULL }}:latest"
+            CONTAINER_NAME=remotetype_server
+            HOST_PORT=8790
 
-            # --memory：宿主机仅 1.7Gi 且长期紧张，上限防 WS 灌包把整机拖垮
-            # ${RT_TOKEN:+...}：secret 未配置时不传，服务无门禁运行
+            # pull 包在 12min 内：ref1 坑 3（GHCR 慢网络兜底），
+            # 超时也不阻断 deploy，本地缓存能用就用（GHCR 公开包亦然）
+            echo "Pulling ${IMAGE}..."
+            timeout 720 docker pull "${IMAGE}" \
+              && echo "pull ok" \
+              || echo "WARN: pull failed/timeout (fallback to local cache)"
+
+            # 镜像必须存在（刚 pull 成功 or 之前缓存）
+            docker image inspect "${IMAGE}" > /dev/null \
+              || { echo "no image at all（pull 失败且无缓存）"; exit 1; }
+
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm   "${CONTAINER_NAME}" 2>/dev/null || true
+
             docker run -d \
-              --name "$CONTAINER_NAME" \
+              --name "${CONTAINER_NAME}" \
               --restart unless-stopped \
               --memory 256m \
               -p "${HOST_PORT}:8790" \
               -v mn_rt_data:/app/data \
               -v mn_rt_logs:/app/logs \
               ${RT_TOKEN:+-e RT_TOKEN="$RT_TOKEN"} \
-              "${IMAGE_NAME}:latest"
+              "${IMAGE}"
 
-            MAX=6
-            i=0
-            ok=false
+            MAX=6; i=0; ok=false
             while [ $i -lt $MAX ]; do
               i=$((i + 1))
-              echo "Health check attempt $i/$MAX..."
-              if curl -f -s "http://localhost:${HOST_PORT}/health" > /dev/null 2>&1; then
-                ok=true
-                echo "Health check passed!"
-                break
+              echo "Health $i/$MAX..."
+              if curl -f -s "http://localhost:${HOST_PORT}/health" > /dev/null; then
+                ok=true; echo "Health passed!"; break
               fi
               sleep 10
             done
 
             if [ "$ok" = false ]; then
-              echo "Health check FAILED. Recent logs:"
-              docker logs "$CONTAINER_NAME" --tail 60
+              echo "Health FAILED. Recent logs:"
+              docker logs "${CONTAINER_NAME}" --tail 60
               exit 1
             fi
 
-            # 每次都 load 完整镜像，旧 :latest 会变 dangling，及时回收（宿主机磁盘 71%）
             docker image prune -f > /dev/null || true
             echo "Deployment successful!"
