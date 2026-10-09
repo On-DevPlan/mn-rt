@@ -225,20 +225,19 @@
   <!-- 01 连接 -->
   <section class="sec" id="secConn">
     <div class="sechead">
-      <span class="no">01</span><h2>连接电脑</h2><span class="spacer"></span>
-      <button class="ghost" id="refreshBtn">↻ 刷新在线</button>
+      <span class="no">01</span><h2>选择电脑</h2><span class="spacer"></span>
+      <button class="ghost" id="refreshBtn">↻ 刷新</button>
     </div>
-    <div class="grid">
+    <div class="pclist" id="pcList"></div>
+    <p class="empty" id="pcEmpty" hidden>暂无 PC 上线 —— 在电脑上运行 <code>npx remotetype serve --align</code></p>
+    <div class="grid" style="margin-top:12px">
       <input class="mono" id="keyInput" placeholder="配对 key（电脑端 serve --align 打印）" autocomplete="off" spellcheck="false">
       <input class="mono" id="tokenInput" placeholder="访问 token（可选，服务器设 RT_TOKEN 时填）" autocomplete="off" spellcheck="false">
-      <input class="mono" id="serverInput" placeholder="服务器地址" autocomplete="off" spellcheck="false">
     </div>
-    <div class="pclist" id="pcList" style="margin-top:10px"></div>
-    <p class="empty" id="pcEmpty" hidden>暂无 PC 上线 —— 在电脑上运行 <code>npx remotetype serve --align</code></p>
     <div style="margin-top:12px">
       <button class="go" id="goBtn">实时同步连接</button>
     </div>
-    <p class="hint" id="connHint"></p>
+    <p class="hint" id="connHint">先选 PC，再填 key</p>
   </section>
 
   <!-- 02 实时同步 -->
@@ -327,8 +326,7 @@
   function saveSession() {
     try {
       sessionStorage.setItem(KEY_STORE, JSON.stringify({
-        key: $('keyInput').value, token: $('tokenInput').value,
-        server: $('serverInput').value, target,
+        key: $('keyInput').value, token: $('tokenInput').value, target,
       }));
     } catch (_) { /* 隐私模式等 */ }
   }
@@ -337,6 +335,10 @@
   }
 
   // ---------- 在线 PC 列表 ----------
+  // 服务器地址即页面来源（本页由 server 托管），无需填写
+  function serverBase() {
+    return location.protocol.startsWith('http') ? location.origin : '';
+  }
   let onlineClients = [];
   async function refreshClients() {
     const base = serverBase();
@@ -348,6 +350,9 @@
     } catch (_) {
       onlineClients = [];
     }
+    // 只有一台在线时自动预选（仍可改选），选中的 PC 掉线则清空选择
+    if (!target && onlineClients.length === 1) target = onlineClients[0];
+    if (target && !onlineClients.includes(target)) target = null;
     renderPcList();
   }
   function renderPcList() {
@@ -366,20 +371,12 @@
     });
     $('pcEmpty').hidden = onlineClients.length > 0;
   }
-  function serverBase() {
-    const v = $('serverInput').value.trim().replace(/\/+$/, '');
-    return v || (location.protocol.startsWith('http') ? location.origin : '');
-  }
 
   // ---------- 连接 ----------
   async function connect() {
     const key = $('keyInput').value.trim();
+    if (!target) { toast('请先在列表中选择要连接的 PC', true); return; }
     if (!key) { toast('请输入配对 key', true); return; }
-    if (!target) {
-      await refreshClients();
-      if (onlineClients.length === 1) target = onlineClients[0];
-      if (!target) { toast('未选择目标 PC（先刷新在线列表或确认电脑已启动 serve --align）', true); return; }
-    }
     saveSession();
     $('goBtn').disabled = true; $('goBtn').textContent = '派生密钥…';
     try {
@@ -416,7 +413,13 @@
         log('REG', 'ok', `目标 ${m.clientId || target} / phoneId ${m.phoneId || phoneId}`);
         showSync();
       } else if (m.type === 'ack') {
-        handleAck(m.ack);
+        if (m.ok === false) {
+          // 服务端投递失败回执（目标 PC 掉线等）
+          toast('电脑已离线，内容未送达', true);
+          log('SEND', 'err', m.status || 'target_offline');
+        } else {
+          handleAck(m.ack);
+        }
       } else if (m.type === 'error') {
         if (/token/.test(m.error || '')) {
           log('AUTH', 'err', '服务器开启了 RT_TOKEN，请在连接页填写同一 token');
@@ -584,21 +587,15 @@
 
   // ---------- 启动 ----------
   (function init() {
-    if (!location.protocol.startsWith('http')) {
-      $('serverInput').placeholder = '服务器地址（如 http://1.2.3.4:8790）';
-    } else {
-      $('serverInput').value = location.origin;
-      $('serverInput').readOnly = true;
-      $('serverInput').title = '本页由服务器托管，地址即当前源';
-    }
     const saved = loadSession();
     if (saved.key) $('keyInput').value = saved.key;
     if (saved.token) $('tokenInput').value = saved.token;
-    if (saved.server && !$('serverInput').value) $('serverInput').value = saved.server;
     target = saved.target || null;
     refreshClients();
+    // 连接页可见期间每 5s 轮询在线列表（连上后 secConn 隐藏，自动停摆）
+    setInterval(() => { if (!$('secConn').hidden) refreshClients(); }, 5000);
     // 已有完整会话记忆时自动重连（刷新页面不掉线）
-    if (saved.key && target) connect();
+    if (saved.key && saved.target) connect();
   })();
 })();
 </script>
