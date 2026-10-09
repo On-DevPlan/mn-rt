@@ -2,7 +2,7 @@
 //!
 //! 一个极简的「字符注入」子进程。设计约束（见需求文档 4.3）：
 //!   * 只从 stdin 逐行读取 JSON 指令，`\n` 分隔；
-//!   * 只支持 `type_text` 与 `ping` 两种指令；
+//!   * 只支持 `type_text` / `backspace` / `ping` 三种指令；
 //!   * 不含任何网络 / 业务逻辑；
 //!   * 每条指令向 stdout 输出一行结果 JSON；
 //!   * 解析失败或注入异常写 stderr，然后继续等待下一条指令（不退出）；
@@ -10,8 +10,10 @@
 //!   * 收到 SIGTERM / SIGINT 时安全退出。
 //!
 //! 协议（Node -> Rust，stdin）:  {"action":"type_text","text":"..."}
+//!       （Node -> Rust，stdin）:  {"action":"backspace","count":N}
 //!       （Node -> Rust，stdin）:  {"action":"ping"}
 //! 协议（Rust -> Node，stdout）: {"ok":true,"msg":"input complete"}
+//!                               {"ok":true,"msg":"backspace complete","count":N}
 //!                               {"ok":false,"msg":"reason"}
 //!
 //! 关于 enigo 版本：需求文档写的 0.1.30 不存在，本项目使用 0.6.1。
@@ -45,7 +47,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use enigo::{Enigo, Keyboard, Settings};
+use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -60,6 +62,10 @@ const LONG_TEXT_THRESHOLD: usize = 400;
 const LONG_TEXT_DELAY_MS: u64 = 45;
 /// 单个分片注入失败时的重试次数。
 const CHUNK_RETRY: usize = 3;
+/// backspace 单条指令的最大次数上限（防御异常大值，10k 次 ≈ 足够清空任何合理文本）。
+const BACKSPACE_MAX: usize = 10_000;
+/// 相邻两次退格之间的延时（毫秒）：目标程序需要时间处理删除。
+const BACKSPACE_DELAY_MS: u64 = 10;
 
 /// 来自 Node 的指令。使用 `Option` 兜底可选字段。
 #[derive(Debug, Deserialize)]
@@ -67,6 +73,8 @@ struct Command {
     action: String,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    count: Option<usize>,
 }
 
 /// 向 stdout 写一行 JSON 结果。
@@ -165,6 +173,28 @@ fn type_text(enigo: &mut Enigo, raw: &str) -> Result<usize, String> {
     Ok(total)
 }
 
+/// 防御性收敛 backspace 次数：缺失按 0 处理，超上限截断。
+fn clamp_backspace_count(count: Option<usize>) -> usize {
+    count.unwrap_or(0).min(BACKSPACE_MAX)
+}
+
+/// 执行 N 次退格（relay 对齐模式的删除原语）。
+///
+/// 不做重试：重试会导致多删（宁少勿多，上层 mirror 会自愈）。
+/// 返回实际发送的退格次数。
+fn backspace_n(enigo: &mut Enigo, count: usize) -> Result<usize, String> {
+    for i in 0..count {
+        enigo
+            .key(Key::Backspace, Direction::Click)
+            .map_err(|e| format!("backspace {}/{} failed: {e}", i + 1, count))?;
+        if i + 1 < count {
+            thread::sleep(Duration::from_millis(BACKSPACE_DELAY_MS));
+        }
+    }
+    log_err(&format!("sent {count} backspaces"));
+    Ok(count)
+}
+
 /// 处理单条指令。所有错误都转成结果 JSON，保证主循环不因单条指令退出。
 fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
     let trimmed = line.trim();
@@ -206,6 +236,34 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
                 Err(reason) => {
                     log_err(&reason);
                     // 注入失败可能意味着底层连接已损坏，丢弃实例以便下条重建
+                    *enigo = None;
+                    emit(json!({ "ok": false, "msg": reason }));
+                }
+            }
+        }
+        "backspace" => {
+            let count = clamp_backspace_count(cmd.count);
+            if count == 0 {
+                emit(json!({ "ok": true, "msg": "backspace complete", "count": 0 }));
+                return;
+            }
+
+            if enigo.is_none() {
+                match new_enigo() {
+                    Ok(e) => *enigo = Some(e),
+                    Err(msg) => {
+                        log_err(&msg);
+                        emit(json!({ "ok": false, "msg": msg }));
+                        return;
+                    }
+                }
+            }
+
+            let instance = enigo.as_mut().expect("enigo just initialized");
+            match backspace_n(instance, count) {
+                Ok(n) => emit(json!({ "ok": true, "msg": "backspace complete", "count": n })),
+                Err(reason) => {
+                    log_err(&reason);
                     *enigo = None;
                     emit(json!({ "ok": false, "msg": reason }));
                 }
@@ -288,4 +346,42 @@ fn main() {
     // 释放 Enigo：其 Drop 会松开仍按住的按键，避免遗留按键状态。
     drop(enigo);
     log_err("input-agent stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backspace_count_defaults_to_zero_when_missing() {
+        assert_eq!(clamp_backspace_count(None), 0);
+    }
+
+    #[test]
+    fn backspace_count_passes_through_normal_values() {
+        assert_eq!(clamp_backspace_count(Some(1)), 1);
+        assert_eq!(clamp_backspace_count(Some(BACKSPACE_MAX)), BACKSPACE_MAX);
+    }
+
+    #[test]
+    fn backspace_count_caps_absurd_values() {
+        assert_eq!(clamp_backspace_count(Some(usize::MAX)), BACKSPACE_MAX);
+        assert_eq!(clamp_backspace_count(Some(999_999)), BACKSPACE_MAX);
+    }
+
+    #[test]
+    fn command_parses_backspace_action() {
+        let cmd: Command =
+            serde_json::from_str(r#"{"action":"backspace","count":42}"#).expect("parse ok");
+        assert_eq!(cmd.action, "backspace");
+        assert_eq!(clamp_backspace_count(cmd.count), 42);
+    }
+
+    #[test]
+    fn command_parses_without_optional_fields() {
+        let cmd: Command = serde_json::from_str(r#"{"action":"ping"}"#).expect("parse ok");
+        assert_eq!(cmd.action, "ping");
+        assert!(cmd.text.is_none());
+        assert!(cmd.count.is_none());
+    }
 }

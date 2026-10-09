@@ -22,7 +22,49 @@
 设计上的两条硬边界：
 
 - **Node 与 Rust 之间只走 stdio 管道**，不用 FFI / ABI。Rust 子进程崩溃不影响 Node 主进程，可以独立重启。
-- **不做 GUI、不做鉴权加密**（MVP 范围），先把端到端链路跑通。
+- serve 原模式不做鉴权加密（MVP 边界）；**对齐模式**（`--align`）自带端到端加密与输入实时对齐（见下文）。
+
+---
+
+## 对齐模式（`serve --align` · 端到端加密 · 输入实时对齐）
+
+在原 serve 链路上加一层 RT1 协议：手机端（fr「远程输入」demo）上传**加密全文快照**，
+PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经既有 queue→rust-agent 管线注入——
+**手机输入框与电脑焦点输入框完全对齐，包括删除与中段编辑**。
+
+### 用法
+
+```bash
+# 电脑：启动对齐模式（不传 --key 则自动生成强随机 key 并打印）
+npx remotetype serve --align
+npx remotetype serve --align --key MYKEY123     # 两端用同一个 key
+
+# 手机：fr app → Lab → 远程输入（联机）→ 填服务器地址 + key → 连接电脑
+# 服务器：同原模式（node server/src/server.js），建议同时设置 RT_TOKEN 注册门禁
+#   设了 RT_TOKEN 后，PC 端须携带同一 token（--token 或环境变量 REMOTETYPE_TOKEN / RT_TOKEN）：
+npx remotetype serve --align --token SECRET
+```
+
+### 协议要点（RT1 直连版）
+
+- **一 key 三用**：key 归一化后 PBKDF2→HKDF 派生 配对盐/AAD 上下文/双方向 AES 密钥；
+  房间号派生仅作 AAD 标签，不再是路由地址。
+- **无配对握手**：中转服务器是哑路由（按 clientId 转发），没有广播房间要保护——
+  「第一个能通过 GCM tag 校验的信封」即会话确立，tag 本身就是持钥证明。
+- **对齐**：手机每次输入框变更上传全文快照（AES-256-GCM，随机 nonce，
+  AAD 绑定 `RT1|<派生标签>|方向|seq`），PC diff（grapheme 级 + 后缀优化）→ 注入 → 累积 ACK
+  （经服务端按 phoneId 反向路由）；手机能解开 ACK = 端到端闭环成立。
+- **防重放**：seq 单调去重；手机重启换会话号自动重置 seq 域；明文流量在 align 模式下一律拒绝。
+
+### 安全边界（务必阅读）
+
+- **key 即凭据**：拿到 key = 可向这台电脑注入任意文本 + 解密全部输入内容。勿外传、勿入库。
+- 中转链路为明文 WS（机密性由端侧加密承担）；元数据（clientId、时序、长度）不设防。
+- 服务器可设 `RT_TOKEN`（或 `--token`）注册门禁：防陌生人注册灌包。PC 端以 `--token`
+  （或 `REMOTETYPE_TOKEN` / `RT_TOKEN` 环境变量）携带同一值，不符会被 4403 拒绝并停止重连；
+  PC 端对齐模式本身也会丢弃一切非信封/解密失败的流量。
+- 对齐语义限制：PC 侧用户手工移动光标/打字会破坏对齐（与同类工具一致的已知限制）；
+  清空超长文本靠逐键退格，耗时与长度成正比。
 
 ---
 
@@ -73,6 +115,7 @@ npm start
 |---|---|---|
 | `RT_PORT` | `8899` | 监听端口 |
 | `RT_HOST` | `0.0.0.0` | 监听地址 |
+| `RT_TOKEN` | （空） | 注册门禁 token：设置后 WS 注册与 HTTP `/push` 都必须携带，未注册连接的任何消息被 4403 拒绝 |
 | `RT_RECORD_FILE` | `./data/records.jsonl` | 转录记录文件 |
 | `RT_LOG_DIR` | `./logs` | 日志目录 |
 | `RT_LOG_LEVEL` | `info` | 日志级别 |
@@ -322,9 +365,9 @@ https://github.com/ZHLX2005/mn-rt/releases/download/v0.1.0/linux-x64/input-agent
 
 ## 已知限制（MVP 范围）
 
-- 无鉴权、无加密。公网部署前必须自行加 TLS 与访问控制。
+- serve 原模式无鉴权、无加密。公网部署前必须自行加 TLS 与访问控制（对齐模式已内置端到端加密，见上文；RT_TOKEN 可作注册门禁）。
 - 无 GUI。
-- 手机端 ASR 尚未接入，当前用 HTTP `/push` 模拟。
+- 手机端 ASR 已接入 fr「远程输入」demo（对齐模式）；serve 原模式仍用 HTTP `/push` 模拟。
 - Wayland 不支持。
 - macOS 需手动授权，无法自动完成。
 - 服务端为单进程内存态连接表，不支持多实例水平扩展。

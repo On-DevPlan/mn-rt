@@ -77,6 +77,8 @@ function createServer(userConfig = {}) {
   // ---- 会话表 ----
   /** clientId -> ws  （PC 客户端） */
   const pcs = new Map();
+  /** phoneId -> ws （手机端，用于 PC→手机 的 ACK 反向路由） */
+  const phones = new Map();
   /** ws -> 连接元信息 */
   const peers = new Map();
   let nextPeerId = 1;
@@ -126,7 +128,11 @@ function createServer(userConfig = {}) {
     // 测试接口：curl -X POST http://host:port/push -d '{"clientId":"pc-001","text":"hi"}'
     // 也支持 GET：/push?clientId=pc-001&text=hi
     if (url.pathname === '/push' && (req.method === 'POST' || req.method === 'GET')) {
+      // 设了 RT_TOKEN 时 /push 同样需要 token（query 或 body 任一携带），堵住绕过注册门禁的旁路
       const finish = (body) => {
+        if (config.token && (body?.token ?? url.searchParams.get('token')) !== config.token) {
+          return send(401, { ok: false, error: 'invalid token' });
+        }
         const clientId = body?.clientId;
         const text = body?.text;
         if (!clientId || typeof text !== 'string') {
@@ -255,8 +261,18 @@ function createServer(userConfig = {}) {
 
       // --- 1) 握手 / 身份注册 ---
       // PC 客户端：{"type":"register","role":"pc","clientId":"pc-001"}
-      // 手机端也可以先注册，便于服务端统计
+      // 手机端：{"type":"register","role":"phone","phoneId":"phone-xxx","token":"..."}
+      //   phoneId 用于 PC→手机 的 ACK 反向路由；不传则服务端生成并在 registered 帧里下发
       if (msg.type === 'register') {
+        // 接入 token（RT_TOKEN / --token）：设置后注册必须携带，否则 4403
+        if (config.token && msg.token !== config.token) {
+          stats.rejected += 1;
+          logger.warn('register rejected: bad token', { peerId, role: msg.role });
+          sendJson(ws, { type: 'error', error: 'invalid token' });
+          try { ws.close(4403, 'invalid token'); } catch { /* ignore */ }
+          return;
+        }
+
         const clientId = msg.clientId ? String(msg.clientId) : null;
         const role = msg.role === 'pc' ? 'pc' : msg.role === 'phone' ? 'phone' : 'unknown';
 
@@ -276,16 +292,57 @@ function createServer(userConfig = {}) {
           pcs.set(clientId, ws);
         }
 
+        let phoneId = null;
+        if (role === 'phone') {
+          phoneId = msg.phoneId ? String(msg.phoneId) : `phone-${peerId}`;
+          // 同一 phoneId 重复上线：踢旧
+          const existingPhone = phones.get(phoneId);
+          if (existingPhone && existingPhone !== ws) {
+            logger.warn('phoneId re-registered, closing previous connection', { phoneId, peerId });
+            try { existingPhone.close(4001, 'replaced'); } catch { /* ignore */ }
+          }
+          phones.set(phoneId, ws);
+        }
+
         meta.role = role;
         meta.clientId = clientId;
-        logger.info('peer registered', { peerId, role, clientId });
-        sendJson(ws, { type: 'registered', role, clientId });
+        meta.phoneId = phoneId;
+        meta.registered = true;
+        logger.info('peer registered', { peerId, role, clientId, phoneId });
+        sendJson(ws, { type: 'registered', role, clientId, phoneId });
         return;
       }
 
       // --- 2) 心跳 ---
       if (msg.type === 'ping') {
         sendJson(ws, { type: 'pong', ts: Date.now() });
+        return;
+      }
+
+      // --- 2.5) 注册门禁：设了 RT_TOKEN 后，注册之外的任何消息都要求先完成合法注册 ---
+      // 否则「跳过 register 直接发 text/ack」即可绕过 token 校验（2026-10-09 审查发现）
+      if (config.token && !meta.registered) {
+        stats.rejected += 1;
+        logger.warn('message before register while token enabled', { peerId, type: msg.type });
+        sendJson(ws, { type: 'error', error: 'register required (token enabled)' });
+        try { ws.close(4403, 'register required'); } catch { /* ignore */ }
+        return;
+      }
+
+      // --- 3) PC → 手机 的 ACK 反向路由 ---
+      // PC 端：{"type":"ack","phoneId":"phone-xxx","ack":{sid,seq,nonce,ct}}
+      // 服务端不解析 ack 内容，按 phoneId 转发：{"type":"ack","ack":{...}}
+      if (msg.type === 'ack') {
+        const targetPhone = msg.phoneId ? phones.get(String(msg.phoneId)) : null;
+        if (!targetPhone) {
+          stats.offline += 1;
+          logger.warn('ack target phone offline', { phoneId: msg.phoneId, peerId });
+          sendJson(ws, { type: 'ack_status', ok: false, status: 'target_offline', phoneId: msg.phoneId });
+          return;
+        }
+        const delivered = sendJson(targetPhone, { type: 'ack', ack: msg.ack });
+        logger.info('ack forwarded', { phoneId: msg.phoneId, delivered });
+        sendJson(ws, { type: 'ack_status', ok: delivered, status: delivered ? 'forwarded' : 'send_failed', phoneId: msg.phoneId });
         return;
       }
 
@@ -317,6 +374,10 @@ function createServer(userConfig = {}) {
       if (meta?.clientId && meta.role === 'pc' && pcs.get(meta.clientId) === ws) {
         pcs.delete(meta.clientId);
         logger.info('pc client offline', { clientId: meta.clientId, peerId });
+      }
+      if (meta?.phoneId && phones.get(meta.phoneId) === ws) {
+        phones.delete(meta.phoneId);
+        logger.info('phone offline', { phoneId: meta.phoneId, peerId });
       }
       peers.delete(ws);
       logger.info('peer disconnected', { peerId, code });

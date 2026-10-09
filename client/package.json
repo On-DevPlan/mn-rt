@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "start": "node bin/index.js serve",
-    "test:local": "node bin/index.js test \"本地注入测试\""
+    "test:local": "node bin/index.js test \"本地注入测试\"",
+    "test": "node test/unit.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

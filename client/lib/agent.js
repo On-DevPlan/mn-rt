@@ -332,6 +332,12 @@ class AgentManager {
     return res;
   }
 
+  /** 便捷方法：向焦点输入框发送 N 次退格（relay 对齐模式的删除原语）。 */
+  async backspace(count, timeoutMs) {
+    const res = await this.send({ action: 'backspace', count }, timeoutMs);
+    return res;
+  }
+
   /** 优雅关闭：结束 stdin -> 等待退出 -> 超时强杀。 */
   async stop() {
     this.shuttingDown = true;

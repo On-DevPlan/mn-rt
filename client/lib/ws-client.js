@@ -16,6 +16,7 @@ class ServeClient extends EventEmitter {
    * @param {object} opts
    * @param {string} opts.url             ws:// 或 wss:// 地址
    * @param {string} opts.clientId        本机唯一标识（用于服务端路由）
+   * @param {string} [opts.token]         注册门禁 token（服务器设 RT_TOKEN 后必须携带）
    * @param {object} opts.logger
    * @param {number} [opts.maxBackoffMs]  退避上限，默认 10000
    * @param {number} [opts.baseBackoffMs] 退避基数，默认 1000
@@ -25,6 +26,7 @@ class ServeClient extends EventEmitter {
     super();
     this.url = opts.url;
     this.clientId = opts.clientId;
+    this.token = opts.token ?? null;
     this.logger = opts.logger;
     this.baseBackoffMs = opts.baseBackoffMs ?? 1000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 10000;
@@ -74,8 +76,8 @@ class ServeClient extends EventEmitter {
       this.stats.connects += 1;
       this.backoffMs = this.baseBackoffMs; // 成功后重置退避
       this.logger?.info('connected to serve', { url: this.url });
-      // 声明身份，服务端据此建立路由
-      this._send({ type: 'register', role: 'pc', clientId: this.clientId });
+      // 声明身份，服务端据此建立路由；token 仅在配置时携带
+      this._send({ type: 'register', role: 'pc', clientId: this.clientId, token: this.token || undefined });
       this._startPing();
       this.emit('connected');
     });
@@ -121,6 +123,14 @@ class ServeClient extends EventEmitter {
       const why = reason ? reason.toString() : '';
       if (this.closedByUser) {
         this.logger?.info('websocket closed by user', { code, reason: why });
+        return;
+      }
+      // 4403 = 注册门禁拒绝（token 缺失/错误）：同样的 token 重连必然同样被拒，
+      // 无限重试只会刷屏，这里停止重连并上抛，交给上层提示用户检查配置。
+      if (code === 4403) {
+        this.logger?.error('注册被服务端拒绝（token 无效或缺失），已停止重连', { reason: why });
+        this.authRejected = true;
+        this.emit('auth-rejected', { reason: why });
         return;
       }
       this.logger?.warn('websocket closed, will reconnect', { code, reason: why });
@@ -183,6 +193,11 @@ class ServeClient extends EventEmitter {
       this.logger?.warn('failed to send to serve', { error: e.message });
       return false;
     }
+  }
+
+  /** 发送一条 JSON 消息到服务端（公共接口，如 PC→手机 的 ACK 路由帧）。 */
+  send(obj) {
+    return this._send(obj);
   }
 
   /** 主动关闭，不再重连。用于优雅退出。 */

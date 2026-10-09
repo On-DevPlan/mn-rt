@@ -245,6 +245,224 @@ test('binaryUrl 指向扁平命名 input-agent-<key>[.exe]', () => {
   assert.ok(mac.endsWith('/input-agent-darwin-arm64'), mac);
 });
 
+// ================= RT1 加密（rt-crypto.js） =================
+
+const fs = require('fs');
+const rtCrypto = require('../lib/rt-crypto');
+const vectors = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'vectors', 'rt1-vectors.json'), 'utf8'),
+);
+
+test('RT1 KDF 与对拍向量逐字节一致（跨语言契约）', () => {
+  const d = rtCrypto.deriveFromKey(vectors.input_key);
+  assert.strictEqual(rtCrypto.normalizeKey(vectors.input_key), vectors.normalized_key);
+  assert.strictEqual(d.room, vectors.room);
+  assert.strictEqual(d.pairSalt.toString('hex'), vectors.pair_salt_hex);
+  assert.strictEqual(d.keyPhoneToPc.toString('hex'), vectors.key_phone_to_pc_hex);
+  assert.strictEqual(d.keyPcToPhone.toString('hex'), vectors.key_pc_to_phone_hex);
+});
+
+test('RT1 房间号满足 relay requested_code 规则', () => {
+  assert.match(vectors.room, /^[A-HJ-NP-Z2-9]{5}$/);
+  // 归一化输入只改大小写/符号，不影响派生
+  const d2 = rtCrypto.deriveFromKey('  RT1-test-key-AB12 ');
+  assert.strictEqual(d2.room, vectors.room);
+});
+
+test('RT1 pairProof 与对拍向量一致', () => {
+  assert.strictEqual(
+    rtCrypto.pairProof(Buffer.from(vectors.pair_salt_hex, 'hex'), vectors.pair_nonce),
+    vectors.pair_proof_hex,
+  );
+});
+
+test('RT1 能打开向量信封并还原明文', () => {
+  const d = rtCrypto.deriveFromKey(vectors.input_key);
+  const aad = rtCrypto.buildAad(vectors.room, vectors.envelope.direction, vectors.envelope.seq);
+  const plain = rtCrypto.open(d.keyPhoneToPc, aad, vectors.envelope);
+  assert.deepStrictEqual(plain, vectors.envelope_plaintext);
+});
+test('RT1 seal/open 往返 + AAD 篡改拒绝', () => {
+  const d = rtCrypto.deriveFromKey(vectors.input_key);
+  const aad = rtCrypto.buildAad(d.room, 'c2p', 3);
+  const env = rtCrypto.seal(d.keyPcToPhone, aad, { applied_seq: 9, ts: 1 }, { sid: 'ff', seq: 3 });
+  assert.deepStrictEqual(rtCrypto.open(d.keyPcToPhone, aad, env), { applied_seq: 9, ts: 1 });
+
+  // 换方向/换房间/换 seq 的 AAD 都必须解不开
+  assert.throws(() => rtCrypto.open(d.keyPcToPhone, rtCrypto.buildAad(d.room, 'p2c', 3), env));
+  assert.throws(() => rtCrypto.open(d.keyPcToPhone, rtCrypto.buildAad('ZZZZZ', 'c2p', 3), env));
+  assert.throws(() => rtCrypto.open(d.keyPcToPhone, rtCrypto.buildAad(d.room, 'c2p', 4), env));
+  // 换密钥解不开
+  assert.throws(() => rtCrypto.open(d.keyPhoneToPc, aad, env));
+  // 密文被翻动解不开
+  const bad = { ...env, ct: env.ct.slice(0, -4) + (env.ct.endsWith('AAAA') ? 'BBBB' : 'AAAA') };
+  assert.throws(() => rtCrypto.open(d.keyPcToPhone, aad, bad));
+});
+
+test('generateKey 产出 20 位无易混字符 key，且可正常派生', () => {
+  const key = rtCrypto.generateKey();
+  assert.match(key, new RegExp(`^[${rtCrypto.ROOM_ALPHABET}]{20}$`));
+  const d = rtCrypto.deriveFromKey(key);
+  assert.match(d.room, /^[A-HJ-NP-Z2-9]{5}$/);
+});
+
+// ================= RT1 diff（rt-diff.js） =================
+
+const { planTransition, graphemes } = require('../lib/rt-diff');
+
+test('diff：grapheme 拆分（emoji ZWJ / 组合字符为一个整体）', () => {
+  assert.deepStrictEqual(graphemes('家庭👨‍👩‍👧‍👦'), ['家', '庭', '👨‍👩‍👧‍👦']);
+  assert.deepStrictEqual(graphemes('Cafe\u{301}'), ['C', 'a', 'f', 'e\u{301}']);
+});
+
+test('diff：FlowType 用例集（追加/改尾/删 emoji/组合字符不破坏）', () => {
+  assert.deepStrictEqual(planTransition('你好', '你好，Windows'), { backspaces: 0, insert: '，Windows' });
+  assert.deepStrictEqual(planTransition('正在输入旧内容', '正在输入新文本'), { backspaces: 3, insert: '新文本' });
+  assert.deepStrictEqual(planTransition('家庭👨‍👩‍👧‍👦', '家庭'), { backspaces: 1, insert: '' });
+  assert.deepStrictEqual(planTransition('Cafe\u{301}', 'Cafe\u{301} 好'), { backspaces: 0, insert: ' 好' });
+});
+
+test('diff：中段编辑只回删中段（后缀优化）', () => {
+  assert.deepStrictEqual(planTransition('ABCDE', 'ABXDE'), { backspaces: 1, insert: 'X' });
+  assert.deepStrictEqual(planTransition('前缀[旧]后缀', '前缀[新]后缀'), { backspaces: 1, insert: '新' });
+});
+
+test('diff：清空 / 从空开始 / 无变化 / 后缀重叠边界', () => {
+  assert.deepStrictEqual(planTransition('你好世界', ''), { backspaces: 4, insert: '' });
+  assert.deepStrictEqual(planTransition('', '你好'), { backspaces: 0, insert: '你好' });
+  assert.deepStrictEqual(planTransition('same', 'same'), { backspaces: 0, insert: '' });
+  // 重叠防护：prefix+suffix 不得越过短文本长度
+  assert.deepStrictEqual(planTransition('aaa', 'aaaa'), { backspaces: 0, insert: 'a' });
+  assert.deepStrictEqual(planTransition('aaaa', 'aaa'), { backspaces: 1, insert: '' });
+});
+
+// ================= RtAlignSession 状态机（纯逻辑，不连网） =================
+
+const { RtAlignSession, looksLikeEnvelope } = require('../lib/rt-align');
+
+/** 构造一个不连网的 align 会话，收集 op 事件与 ACK 外发。 */
+function newTestAlign(key) {
+  const acks = [];
+  const align = new RtAlignSession({
+    key,
+    sendAck: (envelope) => acks.push(envelope),
+  });
+  const ops = [];
+  align.on('op', (op) => ops.push(op));
+  return { align, ops, acks };
+}
+
+/** 以手机身份密封一条全文（走真实加密链路）。 */
+function sealedSync(align, text, seq, sid = 's1', phoneId = 'phone-e2e') {
+  const { seal, buildAad } = require('../lib/rt-crypto');
+  return JSON.stringify(
+    seal(align.keyPhoneToPc, buildAad(align.room, 'p2c', seq), { text, ts: 0, phoneId }, { sid, seq }),
+  );
+}
+
+test('looksLikeEnvelope 嗅探信封形状', () => {
+  assert.ok(looksLikeEnvelope('{"sid":"a","seq":1,"nonce":"n","ct":"c"}'));
+  assert.ok(!looksLikeEnvelope('just plain text'));
+  assert.ok(!looksLikeEnvelope('{"sid":"a","seq":1}')); // 缺字段
+  assert.ok(!looksLikeEnvelope('not json {'));
+});
+
+test('align：明文拒绝（直连模式防旁路注入）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  assert.strictEqual(align.handleIncoming('普通明文文本'), 'plaintext');
+  assert.strictEqual(align.stats.plaintextRejected, 1);
+  assert.deepStrictEqual(ops, []);
+});
+
+test('align：解密全文 → 产出 backspace/type/commit 计划', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  assert.strictEqual(align.handleIncoming(sealedSync(align, '你好', 1)), 'envelope');
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(ops[0].text, '你好');
+  assert.strictEqual(align.phoneId, 'phone-e2e');
+
+  // 追加：只有 type + commit
+  ops.length = 0;
+  align.commitApplied(1, '你好');
+  align.handleIncoming(sealedSync(align, '你好世界', 2));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(ops[0].text, '世界');
+
+  // 删字：只有 backspace（+commit）
+  ops.length = 0;
+  align.commitApplied(2, '你好世界');
+  align.handleIncoming(sealedSync(align, '你好', 3));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'commit']);
+  assert.strictEqual(ops[0].count, 2);
+});
+
+test('align：中段编辑一次落位（后缀优化贯通到计划层）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '前缀[旧]后缀', 1));
+  align.commitApplied(1, '前缀[旧]后缀');
+  ops.length = 0;
+  align.handleIncoming(sealedSync(align, '前缀[新]后缀', 2));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'type', 'commit']);
+  assert.strictEqual(ops[0].count, 1);
+  assert.strictEqual(ops[1].text, '新');
+});
+
+test('align：busy 期间 coalescing，commit 后对最新全文续跑', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, 'A', 1));
+  // commit 前（busy）又来了 B、C 两版：不得产出针对 B 的计划
+  align.handleIncoming(sealedSync(align, 'AB', 2));
+  align.handleIncoming(sealedSync(align, 'ABC', 3));
+  const opsForA = ops.splice(0);
+  assert.deepStrictEqual(opsForA.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(opsForA[0].text, 'A');
+
+  align.commitApplied(1, 'A');
+  // 续跑直接从 A → C（跳过 B）
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(ops[0].text, 'BC');
+});
+
+test('align：重复 seq 忽略；sid 更换后 seq 域重置', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好', 5));
+  align.commitApplied(5, '你好');
+  ops.length = 0;
+  // 旧 seq 重放：忽略
+  assert.strictEqual(align.handleIncoming(sealedSync(align, '你好!', 5)), 'duplicate');
+  assert.deepStrictEqual(ops, []);
+  // 手机重启：新 sid、seq 从 1 重新开始（与旧文本无公共前后缀 → 回删后重打）
+  align.handleIncoming(sealedSync(align, '新会话', 1, 's2'));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['backspace', 'type', 'commit']);
+  assert.strictEqual(ops[0].count, 2);
+  assert.strictEqual(ops[1].text, '新会话');
+});
+
+test('align：密钥不匹配 → decrypt-error 不崩溃', () => {
+  const { align, ops } = newTestAlign('totally-different-key-99');
+  let decryptErrors = 0;
+  align.on('decrypt-error', () => { decryptErrors += 1; });
+  const honest = newTestAlign(vectors.input_key).align;
+  assert.strictEqual(align.handleIncoming(sealedSync(honest, '你好', 1)), 'duplicate');
+  assert.deepStrictEqual(ops, []);
+  assert.strictEqual(decryptErrors, 1);
+  assert.strictEqual(align.stats.envelopesBad, 1);
+});
+
+test('align：commit 后发 ACK 信封（方向 c2p，手机可解）', () => {
+  const { align, ops, acks } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好', 1));
+  align.commitApplied(1, '你好');
+  assert.strictEqual(acks.length, 1);
+  // 用手机侧对称密钥解 ACK：能还原 applied_seq 即端到端闭环
+  const plain = rtCrypto.open(
+    align.keyPcToPhone,
+    rtCrypto.buildAad(align.room, 'c2p', acks[0].seq),
+    acks[0],
+  );
+  assert.strictEqual(plain.applied_seq, 1);
+});
+
 run().then(() => {
   console.log('\n========================================');
   console.log(`  通过 ${pass}   失败 ${fail}`);
