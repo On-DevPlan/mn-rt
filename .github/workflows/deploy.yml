@@ -1,0 +1,125 @@
+# Deploy — 自包含派（无 registry）：build → docker save → scp → 服务器 load → run
+#
+# 服务器档案 / secrets 配置 / 运维命令：见 server/DEPLOY.md
+# 触发：push 到 main 且动了 server/** 或本文件；或手动 dispatch（也用于回滚旧 commit）
+#
+# Secrets：
+#   HOST / USERNAME / PORT / SSH_KEY   —— 部署机 SSH（SSH_KEY = ~/.ssh/mn_rt_deploy 私钥全文）
+#   RT_TOKEN（可选）                    —— 注册门禁；未配置则服务无门禁运行
+
+name: Deploy
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'server/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: remotetype-server
+  CONTAINER_NAME: remotetype_server
+  HOST_PORT: 8790
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t "${IMAGE_NAME}:latest" server/
+
+      - name: Save Docker image
+        run: docker save "${IMAGE_NAME}:latest" | gzip > app.tar.gz
+
+      # 任一 secret 没配长度都是 0，build/scp 失败也能一眼看出是凭据问题
+      - name: Diagnose secrets (length only)
+        if: always()
+        env:
+          HOST_LEN:     ${{ secrets.HOST }}
+          USERNAME_LEN: ${{ secrets.USERNAME }}
+          SSH_KEY_LEN:  ${{ secrets.SSH_KEY }}
+          PORT_LEN:     ${{ secrets.PORT }}
+        run: |
+          echo "HOST length: ${#HOST_LEN}"
+          echo "USERNAME length: ${#USERNAME_LEN}"
+          echo "SSH_KEY length: ${#SSH_KEY_LEN}"
+          echo "PORT length: ${#PORT_LEN}"
+
+      - name: Copy image to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.PORT || 22 }}
+          source: "app.tar.gz"
+          target: "~/app/"
+          strip_components: 0
+          timeout: 30m
+
+      - name: Deploy on server
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          RT_TOKEN: ${{ secrets.RT_TOKEN }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.PORT || 22 }}
+          envs: RT_TOKEN
+          timeout: 30s
+          command_timeout: 15m
+          script: |
+            set -e
+            APP_DIR="$HOME/app"
+            cd "$APP_DIR"
+
+            # docker load 对损坏 tarball 会静默失败，必须 inspect 防止跑的是旧镜像
+            test -s app.tar.gz || { echo "MISSING app.tar.gz"; exit 1; }
+            docker load < app.tar.gz
+            docker image inspect "${IMAGE_NAME}:latest" > /dev/null \
+              || { echo "load failed — image tag missing"; exit 1; }
+            rm -f app.tar.gz
+
+            docker stop "$CONTAINER_NAME" 2>/dev/null || true
+            docker rm   "$CONTAINER_NAME" 2>/dev/null || true
+
+            # --memory：宿主机仅 1.7Gi 且长期紧张，上限防 WS 灌包把整机拖垮
+            # ${RT_TOKEN:+...}：secret 未配置时不传，服务无门禁运行
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              --restart unless-stopped \
+              --memory 256m \
+              -p "${HOST_PORT}:8790" \
+              -v mn_rt_data:/app/data \
+              -v mn_rt_logs:/app/logs \
+              ${RT_TOKEN:+-e RT_TOKEN="$RT_TOKEN"} \
+              "${IMAGE_NAME}:latest"
+
+            MAX=6
+            i=0
+            ok=false
+            while [ $i -lt $MAX ]; do
+              i=$((i + 1))
+              echo "Health check attempt $i/$MAX..."
+              if curl -f -s "http://localhost:${HOST_PORT}/health" > /dev/null 2>&1; then
+                ok=true
+                echo "Health check passed!"
+                break
+              fi
+              sleep 10
+            done
+
+            if [ "$ok" = false ]; then
+              echo "Health check FAILED. Recent logs:"
+              docker logs "$CONTAINER_NAME" --tail 60
+              exit 1
+            fi
+
+            # 每次都 load 完整镜像，旧 :latest 会变 dangling，及时回收（宿主机磁盘 71%）
+            docker image prune -f > /dev/null || true
+            echo "Deployment successful!"
