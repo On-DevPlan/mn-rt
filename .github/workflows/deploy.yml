@@ -75,19 +75,18 @@ jobs:
           echo "GHCR_TOKEN length: ${#GHCR_TOKEN_LEN} (0=未配，服务器将走匿名 pull，可能 401)"
 
       # 把 GHCR pull 用的鉴权文件以 artifact 形式从 build 传到 deploy（ref1 坑 1：
-      # job output 会被 secret-scanner 拦，artifact 文件不被扫值）
+      # job output 会被 secret-scanner 拦，artifact 文件不被扫值。
+      # GHCR_TOKEN 缺失时写一个空 auth 的 config（base64 of "oauth2:"），
+      # 服务器 pull 会 401——用户从部署日志一眼能看到。
       - name: Write docker pull config
-        if: ${{ secrets.GHCR_TOKEN }}
         env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || '' }}
         run: |
-          set -e
           AUTH_B64=$(printf 'oauth2:%s' "$GHCR_TOKEN" | base64 -w0)
           printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$AUTH_B64" > docker_config.json
           echo "wrote docker_config.json ($(wc -c < docker_config.json) bytes)"
 
       - name: Upload docker config
-        if: ${{ secrets.GHCR_TOKEN }}
         uses: actions/upload-artifact@v4
         with:
           name: docker-config
@@ -95,7 +94,6 @@ jobs:
           retention-days: 1
 
       - name: Download docker config
-        if: ${{ secrets.GHCR_TOKEN }}
         uses: actions/download-artifact@v4
         with:
           name: docker-config
@@ -103,7 +101,6 @@ jobs:
           merge-multiple: true
 
       - name: Copy config to server
-        if: ${{ secrets.GHCR_TOKEN }}
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.HOST }}
