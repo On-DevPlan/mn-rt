@@ -110,6 +110,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev pkg-config
 
+      # 冒烟测试的 hotkey / enter_mode 步骤会真实注入键事件，需要一个 X server。
+      # 起无头 Xvfb 供 enigo 连接（此前步骤 1-4 不注入，缺 Xvfb 的问题一直没暴露）。
+      - name: 启动 Xvfb（注入冒烟测试用）
+        if: matrix.linux
+        run: |
+          sudo apt-get install -y xvfb
+          Xvfb :99 -screen 0 1280x1024x24 &
+          sleep 1
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
       - name: 编译 release
         working-directory: rust/input-agent
         shell: bash
