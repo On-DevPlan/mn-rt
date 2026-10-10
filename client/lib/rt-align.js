@@ -78,7 +78,6 @@ class RtAlignSession extends EventEmitter {
     this.pendingFails = 0;     // 当前 desired 连续注入失败次数（成功 commit 或新快照归零）
     this.ackSeq = 0;
     this.sid = crypto.randomBytes(4).toString('hex');
-    this.paused = false;       // 焦点漂移期间挂起（focus-paused），挂起期间 _dispatch 直接丢弃
 
     this.stats = {
       envelopesOk: 0, envelopesBad: 0, syncsApplied: 0, acksSent: 0, plaintextRejected: 0,
@@ -158,7 +157,7 @@ class RtAlignSession extends EventEmitter {
    * busy 期间只更新 desiredText，commit 后自动续跑（全文快照语义下永远收敛）。
    */
   _dispatch() {
-    if (this.busy || this.paused || this.desiredText === null) return;
+    if (this.busy || this.desiredText === null) return;
     const plan = planTransition(this.mirror, this.desiredText);
     if (plan.backspaces === 0 && plan.insert === '') {
       // 目标已达成（重复快照），仍需补 ACK 推进手机端确认
@@ -248,52 +247,6 @@ class RtAlignSession extends EventEmitter {
     this.busy = false;
     this.busySince = 0;
     this._dispatch();
-  }
-
-  // ================= 挂起/恢复（焦点漂移） =================
-
-  /** 挂起对齐会话：焦点漂移期间停止派发按键计划，避免误删误打。 */
-  pause() {
-    if (this.paused) return;
-    this.paused = true;
-    this.logger?.info('align session paused (focus drift)');
-  }
-
-  /**
-   * 恢复对齐会话：重新派发当前 desired，焦点已回归到目标输入框。
-   * 关键：desiredText / desiredSeq 都保留着（之前的快照），所以新一次
-   * dispatch 从当前 mirror 重新 diff，自然处理「挂起期间手机又改了几个字」。
-   */
-  resume() {
-    if (!this.paused) return;
-    this.paused = false;
-    this.logger?.info('align session resumed (focus restored)');
-    if (this.desiredText !== null) this._dispatch();
-  }
-
-  /**
-   * 发送 ctrl 信封到手机（共用 sendAck 同一传输层 + keyPcToPhone 方向，
-   * 走 c2p 单调 seq 域：手机端会判 ackSeq 顺序与去重）。
-   * @param {string} event 事件名，如 'focus-paused' / 'focus-resumed'
-   */
-  sendCtrl(event) {
-    if (typeof this._sendAckTransport !== 'function') return Promise.resolve();
-    this.ackSeq += 1;
-    const envelope = seal(
-      this.keyPcToPhone,
-      buildAad(this.room, DIR_C2P, this.ackSeq),
-      { event, ts: Date.now() },
-      { sid: this.sid, seq: this.ackSeq },
-    );
-    return new Promise((resolve) => {
-      try {
-        this._sendAckTransport(envelope);
-        this.logger?.info('ctrl sent', { event, seq: this.ackSeq });
-      } catch (e) {
-        this.logger?.warn('ctrl send failed', { event, error: e.message });
-      }
-      resolve();
-    });
   }
 }
 

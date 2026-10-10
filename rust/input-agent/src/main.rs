@@ -88,8 +88,9 @@ struct Command {
 }
 
 /// 注入前的焦点校验。
-/// 返回 Some(cur) = 焦点漂移（未注入，调用方应回 focus_drift）；
-/// 返回 None = 通过校验（焦点匹配，或未绑定，或平台无法识别）。
+/// v0.4.0 起废弃：用户切焦点时直接注入到当前焦点（不再有 drift 拒绝）。
+/// 保留函数体以备未来重新引入校验逻辑（比如按应用白名单、按进程等）。
+#[allow(dead_code)]
 fn check_focus(expect: &Option<String>) -> Option<String> {
     let expected = expect.as_deref()?;
     if expected.is_empty() {
@@ -238,11 +239,8 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
 
     match cmd.action.as_str() {
         "type_text" => {
-            // 焦点漂移校验：先于注入，避免打进用户已切走的输入框
-            if let Some(cur) = check_focus(&cmd.expect_focus) {
-                emit(json!({ "ok": false, "msg": "focus_drift", "focus": cur }));
-                return;
-            }
+            // v0.4.0 起去掉焦点校验：用户手动切焦点时直接注入到当前焦点（alignment
+            // 安全网被有意关闭）。expect_focus 字段保留兼容旧版客户端，忽略即可。
             let text = cmd.text.unwrap_or_default();
 
             // 懒初始化并复用 Enigo 连接：
@@ -261,7 +259,7 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
 
             let instance = enigo.as_mut().expect("enigo just initialized");
             match type_text(instance, &text) {
-                Ok(n) => emit(json!({ "ok": true, "msg": "input complete", "chars": n, "focus": focus::current_focus() })),
+                Ok(n) => emit(json!({ "ok": true, "msg": "input complete", "chars": n })),
                 Err(reason) => {
                     log_err(&reason);
                     // 注入失败可能意味着底层连接已损坏，丢弃实例以便下条重建
@@ -271,14 +269,9 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
             }
         }
         "backspace" => {
-            // 焦点漂移校验同样先于退格：对着别的窗口退格 = 误删用户文件
-            if let Some(cur) = check_focus(&cmd.expect_focus) {
-                emit(json!({ "ok": false, "msg": "focus_drift", "focus": cur }));
-                return;
-            }
             let count = clamp_backspace_count(cmd.count);
             if count == 0 {
-                emit(json!({ "ok": true, "msg": "backspace complete", "count": 0, "focus": focus::current_focus() }));
+                emit(json!({ "ok": true, "msg": "backspace complete", "count": 0 }));
                 return;
             }
 
@@ -295,7 +288,7 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
 
             let instance = enigo.as_mut().expect("enigo just initialized");
             match backspace_n(instance, count) {
-                Ok(n) => emit(json!({ "ok": true, "msg": "backspace complete", "count": n, "focus": focus::current_focus() })),
+                Ok(n) => emit(json!({ "ok": true, "msg": "backspace complete", "count": n })),
                 Err(reason) => {
                     log_err(&reason);
                     *enigo = None;
@@ -309,8 +302,8 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
             emit(json!({ "ok": true, "msg": "pong" }));
         }
         "focus" => {
-            // 对齐模式焦点轮询指令：Node 端在挂起期间每 2s 询问一次，
-            // 焦点回到绑定目标后 Node 自动恢复对齐注入。
+            // 旧版焦点轮询指令的兼容保留：v0.4.0 客户端不再调用此 action，
+            // 但若旧版客户端连上来，回 ok 让其健康检查过——查询返回 null 也无害
             emit(json!({ "ok": true, "focus": focus::current_focus() }));
         }
         other => {
