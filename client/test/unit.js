@@ -17,7 +17,7 @@ const path = require('path');
 const { sanitize, isInvisible, DEFAULT_MAX_LENGTH } = require('../lib/sanitize');
 const { MessageQueue } = require('../lib/queue');
 const platform = require('../lib/platform');
-const { parseArgs } = require('../lib/config');
+const { parseArgs, resolveEnterMode } = require('../lib/config');
 
 let pass = 0;
 let fail = 0;
@@ -407,10 +407,12 @@ function newTestAlign(key) {
 }
 
 /** 以手机身份密封一条全文（走真实加密链路）。 */
-function sealedSync(align, text, seq, sid = 's1', phoneId = 'phone-e2e') {
+function sealedSync(align, text, seq, sid = 's1', phoneId = 'phone-e2e', enterMode) {
   const { seal, buildAad } = require('../lib/rt-crypto');
+  const plain = { text, ts: 0, phoneId };
+  if (enterMode) plain.enterMode = enterMode;
   return JSON.stringify(
-    seal(align.keyPhoneToPc, buildAad(align.room, 'p2c', seq), { text, ts: 0, phoneId }, { sid, seq }),
+    seal(align.keyPhoneToPc, buildAad(align.room, 'p2c', seq), plain, { sid, seq }),
   );
 }
 
@@ -426,6 +428,38 @@ test('align：明文拒绝（直连模式防旁路注入）', () => {
   assert.strictEqual(align.handleIncoming('普通明文文本'), 'plaintext');
   assert.strictEqual(align.stats.plaintextRejected, 1);
   assert.deepStrictEqual(ops, []);
+});
+
+test('align：快照携带合法 enterMode → type op 透传', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '第一行\n第二行', 1, 's1', 'phone-e2e', 'shift_enter'));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(ops[0].enterMode, 'shift_enter');
+});
+
+test('align：旧手机不带 enterMode → type op 不携带该字段', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好', 1));
+  assert.strictEqual(ops[0].op, 'type');
+  assert.ok(!('enterMode' in ops[0]));
+});
+
+test('align：非法 enterMode 丢弃——不透传不崩溃', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好', 1, 's1', 'phone-e2e', 'raw'));
+  assert.ok(!('enterMode' in ops[0]));
+  align.handleIncoming(sealedSync(align, '你好!', 2, 's1', 'phone-e2e', 123));
+  assert.ok(!('enterMode' in ops[0]));
+});
+
+test('align：enterMode 随最新快照切换', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, 'a', 1, 's1', 'phone-e2e', 'shift_enter'));
+  assert.strictEqual(ops[0].enterMode, 'shift_enter');
+  align.commitApplied(1, 'a');
+  ops.length = 0;
+  align.handleIncoming(sealedSync(align, 'ab', 2, 's1', 'phone-e2e', 'enter'));
+  assert.strictEqual(ops[0].enterMode, 'enter');
 });
 
 test('align：解密全文 → 产出 backspace/type/commit 计划', () => {
@@ -550,6 +584,25 @@ test('align：commit 后发 ACK 信封（方向 c2p，手机可解）', () => {
     acks[0],
   );
   assert.strictEqual(plain.applied_seq, 1);
+});
+
+// ================= resolveEnterMode：手机字段 > CLI 配置 > raw =================
+
+test('resolveEnterMode：手机字段优先于 CLI 配置', () => {
+  assert.strictEqual(resolveEnterMode('shift_enter', 'enter'), 'shift_enter');
+  assert.strictEqual(resolveEnterMode('enter', 'shift_enter'), 'enter');
+});
+
+test('resolveEnterMode：手机字段缺失或非法时回退 CLI 配置', () => {
+  assert.strictEqual(resolveEnterMode(undefined, 'shift_enter'), 'shift_enter');
+  assert.strictEqual(resolveEnterMode('bogus', 'shift_enter'), 'shift_enter');
+  assert.strictEqual(resolveEnterMode(null, 'enter'), 'enter');
+  assert.strictEqual(resolveEnterMode('raw', 'shift_enter'), 'shift_enter');
+});
+
+test('resolveEnterMode：两级都无 → raw', () => {
+  assert.strictEqual(resolveEnterMode(undefined, 'raw'), 'raw');
+  assert.strictEqual(resolveEnterMode(undefined, undefined), 'raw');
 });
 
 run().then(() => {

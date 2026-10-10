@@ -168,6 +168,22 @@
     padding: 11px 0 12px;
   }
   .clear:active { color: var(--acc); border-color: var(--acc); }
+
+  /* 回车注入方式开关：发送（Enter）/ 换行（Shift+Enter） */
+  .moderow { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .modelabel { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: .1em; flex: none; }
+  .modeseg { display: inline-flex; flex: none; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .modeseg button {
+    border: 0; background: var(--bg); color: var(--faint); cursor: pointer;
+    font-family: var(--mono); font-size: 12px; letter-spacing: .08em; font-weight: 600;
+    padding: 8px 14px 9px;
+  }
+  .modeseg button + button { border-left: 1px solid var(--line); }
+  .modeseg button:active { color: var(--acc); }
+  .modeseg button[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--acc) 14%, var(--bg)); color: var(--acc);
+  }
+  .modehint { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-left: auto; text-align: right; }
   .syncmeta {
     font-family: var(--mono); font-size: 11px; color: var(--faint); flex: none;
     text-align: right; line-height: 1.4;
@@ -249,6 +265,14 @@
     </div>
     <div class="payloadwrap">
       <textarea id="payload" rows="6" placeholder="在这里打字、删除、或用输入法的语音键说话 —— 内容与电脑焦点输入框实时对齐" autocomplete="off" spellcheck="false"></textarea>
+    </div>
+    <div class="moderow">
+      <span class="modelabel">回车注入</span>
+      <div class="modeseg" role="group" aria-label="回车注入方式">
+        <button id="modeEnter" aria-pressed="true" title="电脑端敲普通 Enter——多数输入框即「发送」">发送</button>
+        <button id="modeShiftEnter" aria-pressed="false" title="电脑端敲 Shift+Enter——微信等「Enter=发送」的框里只换行不发送">换行</button>
+      </div>
+      <span class="modehint" id="modeHint"></span>
     </div>
     <div class="actions">
       <button class="mic" id="micBtn" hidden title="浏览器语音识别">🎙</button>
@@ -502,7 +526,7 @@
     const envelope = await RT1.seal(
       derived.keyPhoneToPc,
       RT1.buildAad(derived.room, RT1.DIR_P2C, seq),
-      { text, ts: Date.now(), phoneId },
+      { text, ts: Date.now(), phoneId, enterMode },
       { sid, seq },
     );
     ws.send(JSON.stringify({ clientId: target, text: JSON.stringify(envelope) }));
@@ -550,6 +574,24 @@
   // IME 合成：合成中挂起，结束立即补发（拼音中间态不上传）
   payload.addEventListener('compositionstart', () => { composing = true; });
   payload.addEventListener('compositionend', () => { composing = false; onInputChanged(); scheduleSync(); });
+
+  // ---------- 回车注入方式（发送=Enter / 换行=Shift+Enter） ----------
+  // localStorage 持久：与 key 不同（key 是敏感的、sessionStorage 关标签即清），
+  // 模式只是用户偏好，跨会话记住更省心。
+  const MODE_STORE = 'rt-enter-mode';
+  let enterMode = 'enter';
+  function applyEnterMode() {
+    $('modeEnter').setAttribute('aria-pressed', String(enterMode === 'enter'));
+    $('modeShiftEnter').setAttribute('aria-pressed', String(enterMode === 'shift_enter'));
+    $('modeHint').textContent = enterMode === 'enter'
+      ? '电脑端敲 Enter（= 发送）'
+      : '电脑端敲 Shift+Enter（换行不发送）';
+    try { localStorage.setItem(MODE_STORE, enterMode); } catch { /* 隐私模式等场景忽略 */ }
+  }
+  $('modeEnter').addEventListener('click', () => { enterMode = 'enter'; applyEnterMode(); });
+  $('modeShiftEnter').addEventListener('click', () => { enterMode = 'shift_enter'; applyEnterMode(); });
+  try { if (localStorage.getItem(MODE_STORE) === 'shift_enter') enterMode = 'shift_enter'; } catch { /* 同上 */ }
+  applyEnterMode();
 
   $('clearBtn').addEventListener('click', () => {
     payload.value = '';

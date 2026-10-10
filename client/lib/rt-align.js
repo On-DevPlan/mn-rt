@@ -33,6 +33,12 @@ const DIR_C2P = 'c2p';
 /** 同一批按键计划注入失败后的立即重试上限（超过则挂起等下一条快照） */
 const PLAN_RETRIES = 3;
 
+/**
+ * 手机端可携带的 enterMode 白名单（随快照明文传输，指示 '\n' 在 PC 侧的注入方式）。
+ * 'raw' 不在列——它只是老手机（不带该字段）在 PC 侧的兜底，不是手机端的合法选择。
+ */
+const ENTER_MODES = new Set(['enter', 'shift_enter']);
+
 /** 判断一段 text 是否形如 RT1 信封（直连模式区分加密/明文流量用）。 */
 function looksLikeEnvelope(text) {
   if (typeof text !== 'string') return false;
@@ -73,6 +79,7 @@ class RtAlignSession extends EventEmitter {
     this.desiredSeq = 0;
     this.lastSyncSid = '';     // 手机端会话号（换会话 = seq 域重置）
     this.phoneId = '';         // 最近一次解密信封里的手机路由标识
+    this.enterMode = '';       // 最近一次快照携带的换行方式（'' = 未携带）
     this.busy = false;         // 按键计划已发出、未 commit
     this.busySince = 0;
     this.pendingFails = 0;     // 当前 desired 连续注入失败次数（成功 commit 或新快照归零）
@@ -145,6 +152,7 @@ class RtAlignSession extends EventEmitter {
 
     this.stats.envelopesOk += 1;
     this.phoneId = typeof plain.phoneId === 'string' ? plain.phoneId : '';
+    this.enterMode = ENTER_MODES.has(plain.enterMode) ? plain.enterMode : '';
     this.desiredText = plain.text;
     this.desiredSeq = seq;
     this.pendingFails = 0; // 新快照 = 新的尝试机会
@@ -173,7 +181,10 @@ class RtAlignSession extends EventEmitter {
       this.emit('op', { op: 'backspace', count: plan.backspaces, seq });
     }
     if (plan.insert !== '') {
-      this.emit('op', { op: 'type', text: plan.insert, seq });
+      // enterMode 随最新快照切换：busy 期间来了新快照，commit 后的续跑用新模式
+      const op = { op: 'type', text: plan.insert, seq };
+      if (this.enterMode) op.enterMode = this.enterMode;
+      this.emit('op', op);
     }
     // commit 是「本批计划完成」的界碑：上层在注入成功后回调 commitApplied
     this.emit('op', { op: 'commit', seq, text });

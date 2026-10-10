@@ -31,7 +31,7 @@ const { LocalStore } = require('../lib/store');
 const { Logger } = require('../lib/logger');
 const { sanitize } = require('../lib/sanitize');
 const { findBinary, isSupported, resolveTarget, binaryUrl, cacheDir } = require('../lib/platform');
-const { loadConfig, parseArgs } = require('../lib/config');
+const { loadConfig, parseArgs, resolveEnterMode } = require('../lib/config');
 
 const pkg = require('../package.json');
 
@@ -327,7 +327,9 @@ async function cmdServe(cfg) {
       });
 
       try {
-        const res = await agent.typeText(cleaned.text, undefined, null, enterModeOpts(cfg));
+        // 换行方式：手机快照字段优先，CLI --enter-mode 兜底（对齐模式 item.enterMode 才有值）
+        const opts = enterModeOpts({ enterMode: resolveEnterMode(item.enterMode, cfg.enterMode) });
+        const res = await agent.typeText(cleaned.text, undefined, null, opts);
         const durationMs = Date.now() - startedAt;
         if (res?.ok) {
           logger.info('注入完成', { durationMs, textLen: cleaned.text.length });

@@ -141,6 +141,22 @@ function loadConfig(flags = {}) {
   return cfg;
 }
 
+/**
+ * 合并手机快照携带的 enterMode 与本地配置，得到本次注入生效的换行方式。
+ * 优先级：手机字段 > CLI/配置文件 > 'raw'。
+ * 手机端只允许 'enter' | 'shift_enter'（'raw' 是老手机缺省时的 PC 侧兜底，
+ * 不作为手机端合法取值），非法值一律视为未携带。
+ * cfg 侧的非法值不做拦截——透传给 rust，由 rust 拒绝并给出明确报错。
+ * @param {string|undefined} phoneMode 手机快照里的 enterMode
+ * @param {string|undefined} cfgMode   本地配置的 enterMode
+ * @returns {'enter'|'shift_enter'|'raw'|string}
+ */
+function resolveEnterMode(phoneMode, cfgMode) {
+  if (phoneMode === 'enter' || phoneMode === 'shift_enter') return phoneMode;
+  if (typeof cfgMode === 'string' && cfgMode !== '') return cfgMode;
+  return 'raw';
+}
+
 module.exports = {
   loadConfig,
   parseArgs,
@@ -148,5 +164,6 @@ module.exports = {
   configFile,
   ensureClientId,
   readConfigFile,
+  resolveEnterMode,
   DEFAULT_SERVE_URL,
 };
