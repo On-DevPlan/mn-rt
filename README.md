@@ -2,6 +2,7 @@
 
 [![build-input-agent](https://github.com/ZHLX2005/mn-rt/actions/workflows/build-input-agent.yml/badge.svg)](https://github.com/ZHLX2005/mn-rt/actions/workflows/build-input-agent.yml)
 [![node-ci](https://github.com/ZHLX2005/mn-rt/actions/workflows/node-ci.yml/badge.svg)](https://github.com/ZHLX2005/mn-rt/actions/workflows/node-ci.yml)
+[![npm version](https://img.shields.io/npm/v/@ondevplann/remotetype)](https://www.npmjs.com/package/@ondevplann/remotetype)
 
 把手机上的语音识别结果，实时注入到电脑当前焦点输入框。
 
@@ -132,15 +133,22 @@ npm start
 npx @ondevplann/remotetype serve --url wss://your-server.example.com/ws
 ```
 
+免安装直接跑（自动拉取对应平台的注入引擎二进制）；也可以全局安装后使用短命令：
+
+```bash
+npm install -g @ondevplann/remotetype
+remotetype serve --url wss://your-server.example.com/ws
+```
+
 首次运行会自动生成并持久化 `clientId`（存于 `~/.remotetype/client-id`），用于服务端按目标路由。
 
 常用参数：
 
 ```bash
-remotetype serve --url <ws-url> --client-id <id> --log-level debug
-remotetype test "这是一段测试文本"     # 本地注入测试，不经过公网
-remotetype doctor                     # 环境自检（平台/权限/二进制）
-remotetype binary                     # 查看注入引擎二进制路径
+npx @ondevplann/remotetype serve --url <ws-url> --client-id <id> --log-level debug
+npx @ondevplann/remotetype test "这是一段测试文本"   # 本地注入测试，不经过公网
+npx @ondevplann/remotetype doctor                   # 环境自检（平台/权限/二进制）
+npx @ondevplann/remotetype binary                   # 查看注入引擎二进制路径
 ```
 
 ### 3. 推送文本（模拟手机端）
@@ -326,9 +334,9 @@ bash test/e2e.sh 2 6      # 只跑用例 2 和 6
 
 ### CI
 
-仓库 `mn-rt` 配有两个工作流：
+仓库 `mn-rt` 配有三个工作流：
 
-**`build-input-agent.yml`** — 4 平台并行编译 Rust 注入引擎（win32-x64 / darwin-x64 / darwin-arm64 / linux-x64），产出 `SHA256SUMS.txt`，并在 Linux 上跑冒烟测试（ping / 非法 JSON / 未知 action 后进程存活 / 空输入）。
+**`build-input-agent.yml`** — 4 平台并行编译 Rust 注入引擎（win32-x64 / darwin-x64 / darwin-arm64 / linux-x64），产出 `SHA256SUMS.txt`，并在 Linux 上跑冒烟测试（ping / 非法 JSON / 未知 action 后进程存活 / 空输入）。push tag `v*` 时自动创建 GitHub Release 并上传产物。
 
 **`node-ci.yml`** — JS 侧检查：
 
@@ -338,20 +346,31 @@ bash test/e2e.sh 2 6      # 只跑用例 2 和 6
 | `client` | 3 平台 × Node 20/22，语法检查 + CLI 冒烟 + 25 项单元测试 |
 | `rust unit` | `cargo test` / `cargo fmt --check` / `cargo clippy -D warnings` |
 
+**`fuck-npm.yml`** — push 到 main 自动发布 npm 包 `@ondevplann/remotetype`（见下节）。
+
 ### 发布
 
+发布 = bump `client/package.json` 版本 + push 到 main，其余全部由 CI 完成：
+
+1. `fuck-npm.yml` 自动打 git tag `v<版本>` 并 `npm publish --provenance`（npm 上已有该版本则幂等跳过）；
+2. tag 触发 `build-input-agent.yml`：4 平台编译 + 自动创建 GitHub Release、上传各平台产物。
+
 ```bash
-git tag -a v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
+# 唯一的手动步骤：改 client/package.json 的 version 后
+git add client/package.json && git commit -m "chore(release): v0.1.x" && git push
 ```
 
-打 tag 会触发 4 平台编译，并自动创建 GitHub Release、上传各平台产物。产物目录结构与 `client/lib/platform.js` 的查找路径一致，客户端可直接按 `binaryUrl()` 下载。
+两层幂等保护：git tag 已存在则跳过创建；npm 上已有该版本则跳过发布 —— 重复 push 安全。
 
 发布后产物地址形如：
 
 ```
 https://github.com/ZHLX2005/mn-rt/releases/download/v0.1.0/linux-x64/input-agent
 ```
+
+**版本纪律**：npm 包版本、git tag、GitHub Release 三者必须同步（运行时二进制下载回退按 `v<npm版本>` 拼地址）。改了 Rust 代码 → 先确认 Release 资产已就位，再发 npm。
+
+**平台分包**（`@ondevplann/input-agent-{win32-x64,linux-x64,darwin-x64,darwin-arm64}`）不在自动发布范围：Rust 产物变更后从 Release 取对应二进制手动 `npm publish`（版本号与 Release tag 一致），darwin 分包待补。
 
 可用 `REMOTETYPE_BINARY_BASE` 覆盖下载源，`REMOTETYPE_VERSION` 覆盖版本号。
 
