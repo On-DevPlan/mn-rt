@@ -5,7 +5,7 @@
  *
  * 分发策略（需求文档 5.1 的「优化方案」）：
  *   1. 优先本地 binaries/<platform>-<arch>/input-agent[.exe]，便于 monorepo / 离线场景；
- *   2. 其次查找平台分包 @remotetype/input-agent-<platform>-<arch>（推荐：主包极小）；
+ *   2. 其次查找平台分包 @ondevplann/input-agent-<platform>-<arch>（推荐：主包极小）；
  *   3. 最后回退到运行时按需下载（从 GitHub Releases），带缓存。
  *
  * 这样主包只含 JS 代码，npx 下载体积最小，同时保留离线可用路径。
@@ -59,9 +59,9 @@ function findBinary({ platform = process.platform, arch = process.arch, extraDir
   // 2) 包内 binaries/<key>/（发布时随包分发，或本地编译产物）
   candidates.push(path.join(__dirname, '..', 'binaries', target.key, file));
 
-  // 3) 平台分包 @remotetype/input-agent-<key>
+  // 3) 平台分包 @ondevplann/input-agent-<key>
   try {
-    const pkg = `@remotetype/input-agent-${target.key}`;
+    const pkg = `@ondevplann/input-agent-${target.key}`;
     const pkgJson = require.resolve(`${pkg}/package.json`);
     candidates.push(path.join(path.dirname(pkgJson), file));
   } catch {

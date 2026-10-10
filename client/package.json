@@ -1,5 +1,5 @@
 {
-  "name": "remotetype",
+  "name": "@ondevplann/remotetype",
   "version": "0.1.2",
   "description": "RemoteType PC 客户端：npx 一键启动，接收手机端语音识别文本并注入到当前焦点输入框",
   "bin": {
@@ -22,10 +22,8 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "@remotetype/input-agent-win32-x64": "0.1.0",
-    "@remotetype/input-agent-darwin-x64": "0.1.0",
-    "@remotetype/input-agent-darwin-arm64": "0.1.0",
-    "@remotetype/input-agent-linux-x64": "0.1.0"
+    "@ondevplann/input-agent-win32-x64": "0.1.0",
+    "@ondevplann/input-agent-linux-x64": "0.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -47,5 +45,10 @@
     "keyboard",
     "automation"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/On-DevPlan/mn-rt.git",
+    "directory": "client"
+  }
 }

@@ -9,7 +9,7 @@
 手机 (ASR 文本)
    │  WebSocket
    ▼
-公网 Serve 服务端  ──按 clientId 路由──►  PC 客户端 (npx remotetype serve)
+公网 Serve 服务端  ──按 clientId 路由──►  PC 客户端 (npx @ondevplann/remotetype serve)
                                               │  Node 业务层
                                               │  stdio IPC（单行 JSON）
                                               ▼
@@ -36,8 +36,8 @@ PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经�
 
 ```bash
 # 电脑：启动对齐模式（不传 --key 则自动生成强随机 key 并打印）
-npx remotetype serve --align
-npx remotetype serve --align --key MYKEY123     # 两端用同一个 key
+npx @ondevplann/remotetype serve --align
+npx @ondevplann/remotetype serve --align --key MYKEY123     # 两端用同一个 key
 
 # 手机方式一（免装 app）：浏览器直接打开 http://<server>:8790/
 #   网页控制台已内置 RT1 实时同步——输入/删除实时对齐，无发送按钮；
@@ -45,7 +45,7 @@ npx remotetype serve --align --key MYKEY123     # 两端用同一个 key
 # 手机方式二：fr app → Lab → 远程输入（联机）→ 填服务器地址 + key → 连接电脑
 # 服务器：同原模式（node server/src/server.js），建议同时设置 RT_TOKEN 注册门禁
 #   设了 RT_TOKEN 后，PC 端须携带同一 token（--token 或环境变量 REMOTETYPE_TOKEN / RT_TOKEN）：
-npx remotetype serve --align --token SECRET
+npx @ondevplann/remotetype serve --align --token SECRET
 ```
 
 ### 协议要点（RT1 直连版）
@@ -129,7 +129,7 @@ npm start
 ### 2. 启动 PC 客户端
 
 ```bash
-npx remotetype serve --url wss://your-server.example.com/ws
+npx @ondevplann/remotetype serve --url wss://your-server.example.com/ws
 ```
 
 首次运行会自动生成并持久化 `clientId`（存于 `~/.remotetype/client-id`），用于服务端按目标路由。

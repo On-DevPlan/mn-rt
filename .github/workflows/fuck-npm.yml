@@ -1,0 +1,78 @@
+# npm 自动发布：push 到 main → 自动打 tag + npm publish（带 provenance 签名）。
+#
+# 发布对象：client/ 下的主包 @ondevplann/remotetype。
+# 平台分包 @ondevplann/input-agent-* 不在本工作流范围（rust 二进制变更时手动发布，
+# 且须同步出 GitHub Release tag —— npm 包版本与 release tag 保持一致，见 mn-rt 版本纪律）。
+#
+# 幂等性两层：git tag 已存在则跳过；npm 上已有该版本则跳过 publish。
+
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # 写 tag 需要；不要省
+
+defaults:
+  run:
+    working-directory: client   # 主包在 client/ 子目录
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0              # 必须 0，tag 检测需要完整历史
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create and push tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Check if version exists on npm
+        id: npm_check
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          if npm view "$PKG_NAME@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> $GITHUB_OUTPUT
+          else
+            echo "published=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npm
+        if: steps.npm_check.outputs.published == 'false'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
