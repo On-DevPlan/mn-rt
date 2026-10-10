@@ -64,12 +64,12 @@ fn linux_focus() -> Option<String> {
     // 每次新建连接：语音输入是低频场景（250ms 防抖 + 快照粒度），
     // Unix socket 连接开销 ~1ms，不值得为缓存引入生命周期管理
     let (conn, screen_num) = x11rb::connect(None).ok()?;
-    let root = conn.setup().roots.get(screen_num)?.root;
+    let root = conn.setup().roots.get(screen_num)?.root.0;
     let reply = conn.get_input_focus().ok()?.reply().ok()?;
-    let focus = reply.focus;
+    // x11rb 0.13 中 GetInputFocusReply.focus 字段就是 u32，不是 Window 包装
     // 0 = X11 None（无焦点），1 = PointerRoot：都视为「焦点不可判定」
-    if focus.0 <= 1 || focus == root {
+    if reply.focus <= 1 || reply.focus == root {
         return None;
     }
-    Some(format!("x11:{:x}", focus.0))
+    Some(format!("x11:{:x}", reply.focus))
 }
