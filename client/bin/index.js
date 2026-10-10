@@ -5,8 +5,8 @@
  * RemoteType PC 客户端 CLI 入口。
  *
  * 子命令：
- *   remotetype serve                  启动守护进程，连接公网 Serve，等待远程文本注入
- *   remotetype serve --align --key K  对齐模式：端到端加密 + 输入框实时对齐（含删除）
+ *   remotetype serve                  启动守护进程（默认对齐模式：端到端加密 + 输入框实时对齐）
+ *   remotetype serve --plain          兼容旧普通模式：只接收整句明文推送（无对齐）
  *   remotetype test "文本"             本地直接测试 Rust 注入，不走公网服务
  *   remotetype doctor                 环境自检（平台/二进制/权限/网络）
  *   remotetype binary                 打印解析到的 Rust 二进制路径
@@ -58,8 +58,8 @@ ${C.bold}用法${C.reset}
   npx remotetype <command> [options]
 
 ${C.bold}命令${C.reset}
-  ${C.cyan}serve${C.reset}               启动守护进程：连接公网服务，等待远程文本注入
-  ${C.cyan}serve --align${C.reset}       对齐模式：端到端加密 + 输入框实时对齐（含删除）
+  ${C.cyan}serve${C.reset}               启动守护进程：对齐模式（端到端加密，手机输入框与电脑实时对齐，含删除）
+  ${C.cyan}serve --plain${C.reset}       兼容旧普通模式：只接收整句明文推送（/push 接口、外部脚本）
   ${C.cyan}test${C.reset} "<文本>"        本地测试：直接调用注入引擎，不连公网
   ${C.cyan}doctor${C.reset}              环境自检：平台支持 / 注入二进制 / 权限 / 网络
   ${C.cyan}binary${C.reset}              打印解析到的注入引擎路径
@@ -67,8 +67,9 @@ ${C.bold}命令${C.reset}
 ${C.bold}选项${C.reset}
   --url <ws://...>       公网服务地址（默认 ${require('../lib/config').DEFAULT_SERVE_URL}）
   --client-id <id>       本机唯一标识，服务端按此路由（默认自动生成并持久化）
-  --align                对齐模式：只接受 RT1 加密信封，手机输入与电脑实时对齐
   --key <KEY>            对齐模式配对 key（不传则自动生成强随机并打印；手机端输入同一 key）
+  --plain                切回旧普通模式：接收整句明文推送（无对齐、无加密）
+  --align                （已默认开启，保留兼容；与 --plain 同给时 --plain 优先）
   --token <TOKEN>        注册门禁 token（服务器设 RT_TOKEN 后两端都必须携带同一值）
   --log-level <level>    debug | info | warn | error（默认 info）
   --max-queue <n>        本地消息队列上限（默认 100）
@@ -78,9 +79,9 @@ ${C.bold}选项${C.reset}
   --version              显示版本
 
 ${C.bold}示例${C.reset}
-  npx remotetype serve --url ws://1.2.3.4:8790/ws
-  npx remotetype serve --align                 # 自动生成 key，复制到手机
-  npx remotetype serve --align --key MYKEY123  # 两端用同一个 key
+  npx remotetype serve --url ws://1.2.3.4:8790/ws   # 对齐模式，自动生成 key，复制到手机
+  npx remotetype serve --key MYKEY123               # 两端用同一个 key
+  npx remotetype serve --plain                      # 旧普通模式（接收 /push 整句推送）
   npx remotetype test "你好，这是一条本地注入测试"
   npx remotetype doctor
 `);

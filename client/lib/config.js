@@ -124,8 +124,8 @@ function loadConfig(flags = {}) {
     requestTimeoutMs: num(flags.requestTimeoutMs ?? env.REMOTETYPE_REQUEST_TIMEOUT ?? file.requestTimeoutMs, 30000),
     // 二进制
     agentPath: flags.agent ?? env.REMOTETYPE_AGENT ?? file.agentPath ?? null,
-    // 对齐模式（--align 开关：加密 + 输入实时对齐；--key 传配对 key）
-    align: flags.align === true,
+    // 对齐模式（serve 默认开启；--plain 切回旧普通模式，--align 保留兼容）
+    align: flags.plain === true ? false : true,
     alignKey: flags.key ?? env.REMOTETYPE_KEY ?? file.alignKey ?? null,
     // 注册门禁 token（服务器设 RT_TOKEN 后必须携带同一值才能注册）
     token: flags.token ?? env.REMOTETYPE_TOKEN ?? env.RT_TOKEN ?? file.token ?? null,

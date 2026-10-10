@@ -23,30 +23,30 @@
 设计上的两条硬边界：
 
 - **Node 与 Rust 之间只走 stdio 管道**，不用 FFI / ABI。Rust 子进程崩溃不影响 Node 主进程，可以独立重启。
-- serve 原模式不做鉴权加密（MVP 边界）；**对齐模式**（`--align`）自带端到端加密与输入实时对齐（见下文）。
+- **serve 默认对齐模式**（v0.2.0 起）：端到端加密 + 输入实时对齐；旧普通模式降级为 `--plain` 显式开启（见下文）。
 
 ---
 
-## 对齐模式（`serve --align` · 端到端加密 · 输入实时对齐）
+## 对齐模式（serve 默认 · 端到端加密 · 输入实时对齐）
 
-在原 serve 链路上加一层 RT1 协议：手机端（fr「远程输入」demo）上传**加密全文快照**，
+RT1 协议：手机端（网页控制台 / fr「远程输入」demo）上传**加密全文快照**，
 PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经既有 queue→rust-agent 管线注入——
 **手机输入框与电脑焦点输入框完全对齐，包括删除与中段编辑**。
 
 ### 用法
 
 ```bash
-# 电脑：启动对齐模式（不传 --key 则自动生成强随机 key 并打印）
-npx @ondevplann/remotetype serve --align
-npx @ondevplann/remotetype serve --align --key MYKEY123     # 两端用同一个 key
+# 电脑：启动（不传 --key 则自动生成强随机 key 并打印）
+npx @ondevplann/remotetype serve
+npx @ondevplann/remotetype serve --key MYKEY123     # 两端用同一个 key
 
 # 手机方式一（免装 app）：浏览器直接打开 http://<server>:8790/
 #   网页控制台已内置 RT1 实时同步——输入/删除实时对齐，无发送按钮；
 #   非加密上下文（http）里浏览器语音不可用，用输入法自带语音键即可
 # 手机方式二：fr app → Lab → 远程输入（联机）→ 填服务器地址 + key → 连接电脑
-# 服务器：同原模式（node server/src/server.js），建议同时设置 RT_TOKEN 注册门禁
+# 服务器：node server/src/server.js，建议同时设置 RT_TOKEN 注册门禁
 #   设了 RT_TOKEN 后，PC 端须携带同一 token（--token 或环境变量 REMOTETYPE_TOKEN / RT_TOKEN）：
-npx @ondevplann/remotetype serve --align --token SECRET
+npx @ondevplann/remotetype serve --token SECRET
 ```
 
 ### 协议要点（RT1 直连版）
@@ -130,14 +130,14 @@ npm start
 ### 2. 启动 PC 客户端
 
 ```bash
-npx @ondevplann/remotetype serve --url wss://your-server.example.com/ws
+npx @ondevplann/remotetype serve --url ws://your-server.example.com:8790/ws
 ```
 
-免安装直接跑（自动拉取对应平台的注入引擎二进制）；也可以全局安装后使用短命令：
+serve 默认**对齐模式**：自动生成配对 key 并打印，手机端（网页控制台 / fr app）填同一 key 即可实时对齐。也可以全局安装后使用短命令：
 
 ```bash
 npm install -g @ondevplann/remotetype
-remotetype serve --url wss://your-server.example.com/ws
+remotetype serve --url ws://your-server.example.com:8790/ws
 ```
 
 首次运行会自动生成并持久化 `clientId`（存于 `~/.remotetype/client-id`），用于服务端按目标路由。
@@ -146,20 +146,33 @@ remotetype serve --url wss://your-server.example.com/ws
 
 ```bash
 npx @ondevplann/remotetype serve --url <ws-url> --client-id <id> --log-level debug
-npx @ondevplann/remotetype test "这是一段测试文本"   # 本地注入测试，不经过公网
-npx @ondevplann/remotetype doctor                   # 环境自检（平台/权限/二进制）
-npx @ondevplann/remotetype binary                   # 查看注入引擎二进制路径
+npx @ondevplann/remotetype serve --key MYKEY123       # 两端用同一个 key
+npx @ondevplann/remotetype serve --plain              # 旧普通模式（见下）
+npx @ondevplann/remotetype test "这是一段测试文本"     # 本地注入测试，不经过公网
+npx @ondevplann/remotetype doctor                     # 环境自检（平台/权限/二进制）
+npx @ondevplann/remotetype binary                     # 查看注入引擎二进制路径
 ```
 
-### 3. 推送文本（模拟手机端）
+**旧普通模式（`--plain`）**：v0.2.0 前的 serve 行为——接收 `/push` 接口与外部脚本推来的整句明文，
+打完即注入，无对齐、无加密。仅建议 curl / 自动化脚本场景使用：
 
-真实手机端尚未接入时，用 HTTP 测试接口直接推送：
+```bash
+npx @ondevplann/remotetype serve --plain --url ws://your-server.example.com:8790/ws
+curl -X POST http://127.0.0.1:8899/push -H 'Content-Type: application/json' \
+  -d '{"clientId":"pc-abc123","text":"明天上午十点开会"}'
+```
+
+### 3. 推送文本（`--plain` 模式 / 模拟手机端）
+
+PC 端以 `--plain` 启动时，用 HTTP 测试接口直接推送整句文本：
 
 ```bash
 curl -X POST http://127.0.0.1:8899/push \
   -H 'Content-Type: application/json' \
   -d '{"clientId":"pc-abc123","text":"明天上午十点开会"}'
 ```
+
+对齐模式（默认）不走此接口——手机输入经 RT1 加密信封直达 PC 端。
 
 ---
 
@@ -395,9 +408,9 @@ https://github.com/ZHLX2005/mn-rt/releases/download/v0.1.0/linux-x64/input-agent
 
 ## 已知限制（MVP 范围）
 
-- serve 原模式无鉴权、无加密。公网部署前必须自行加 TLS 与访问控制（对齐模式已内置端到端加密，见上文；RT_TOKEN 可作注册门禁）。
+- serve 默认对齐模式已内置端到端加密；`--plain` 模式无鉴权无加密，公网部署前必须自行加 TLS 与访问控制（RT_TOKEN 可作注册门禁）。
 - 无 GUI。
-- 手机端 ASR 已接入 fr「远程输入」demo（对齐模式）；serve 原模式仍用 HTTP `/push` 模拟。
+- 手机端 ASR 已接入 fr「远程输入」demo（对齐模式，即默认 serve）；`--plain` 模式仍用 HTTP `/push` 模拟。
 - Wayland 不支持。
 - macOS 需手动授权，无法自动完成。
 - 服务端为单进程内存态连接表，不支持多实例水平扩展。

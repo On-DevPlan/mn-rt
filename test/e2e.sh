@@ -199,7 +199,7 @@ if want 1; then
 
     REMOTETYPE_HOME="$WORK/home" REMOTETYPE_URL="ws://127.0.0.1:$PORT/ws" \
       REMOTETYPE_CLIENT_ID="$CLIENT_ID" \
-      node "$CLIENT/bin/index.js" serve >"$WORK/client.log" 2>&1 &
+      node "$CLIENT/bin/index.js" serve --plain >"$WORK/client.log" 2>&1 &
     CLI_PID=$!
     sleep 3
 
