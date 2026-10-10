@@ -186,18 +186,25 @@ jobs:
           RESP4=$(printf '{"action":"hotkey","key":"return","modifiers":["shift"]}\n' \
             | timeout 10 "$BIN" 2>/dev/null | head -1 || true)
           echo "hotkey 应答: $RESP4"
-          case "$RESP4" in
-            *'"ok":true'*'hotkey complete'*'shift+return'*) echo "hotkey 组合键注入成功" ;;
-            *) echo "::error::hotkey 处理异常"; exit 1 ;;
-          esac
+          # 逐 token 匹配，不依赖 JSON 键顺序（serde 按字段声明顺序输出，
+          # combo 在 ok 之前，顺序 glob 会误判失败）
+          if echo "$RESP4" | grep -q '"ok":true' \
+            && echo "$RESP4" | grep -q 'hotkey complete' \
+            && echo "$RESP4" | grep -q 'shift+return'; then
+            echo "hotkey 组合键注入成功"
+          else
+            echo "::error::hotkey 处理异常"; exit 1
+          fi
           # 6) 非法 enter_mode 应立即报错且不注入（宁可失败不做静默回退）
           RESP5=$(echo '{"action":"type_text","text":"a","enter_mode":"bogus"}' \
             | timeout 10 "$BIN" 2>/dev/null | head -1 || true)
           echo "非法 enter_mode 应答: $RESP5"
-          case "$RESP5" in
-            *'"ok":false'*'invalid enter_mode'*) echo "非法 enter_mode 被正确拒绝" ;;
-            *) echo "::error::非法 enter_mode 处理异常"; exit 1 ;;
-          esac
+          if echo "$RESP5" | grep -q '"ok":false' \
+            && echo "$RESP5" | grep -q 'invalid enter_mode'; then
+            echo "非法 enter_mode 被正确拒绝"
+          else
+            echo "::error::非法 enter_mode 处理异常"; exit 1
+          fi
           # 7) enter_mode=shift_enter：多行文本应完成「打字 + Shift+Enter 换行」全链路
           #    （Xvfb 无真实窗口，键事件无处显示但协议链路完整可验证）
           RESP6=$(printf '{"action":"type_text","text":"a\\nb","enter_mode":"shift_enter"}\n' \
