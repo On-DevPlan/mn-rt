@@ -27,6 +27,15 @@ default = []
 # Linux X11 后端（RemoteType 唯一支持的 Linux 路径）
 linux-x11 = ["enigo/x11rb"]
 
+# ── 平台特定依赖：焦点识别（对齐模式的 expect_focus 校验）──
+# Windows 用 windows-sys（enigo 0.6.1 已在依赖树里拉了 0.61.2）
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+# Linux 独立新建 X 连接做 GetInputFocus（与 enigo 的 x11rb 连接互不干扰）
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+
 # 说明：enigo 的 wayland 后端在 0.6.1 中存在协议绑定竞态缺陷，
 # 即使对着正常运行的合成器也会构造失败（实测 weston 13）。
 # 故本项目不提供 wayland feature。详见 docs/ENIGO_FINDINGS.md。

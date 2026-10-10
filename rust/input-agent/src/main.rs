@@ -2,12 +2,16 @@
 //!
 //! 一个极简的「字符注入」子进程。设计约束（见需求文档 4.3）：
 //!   * 只从 stdin 逐行读取 JSON 指令，`\n` 分隔；
-//!   * 只支持 `type_text` / `backspace` / `ping` 三种指令；
+//!   * 支持 `type_text` / `backspace` / `ping` / `focus` 四种指令；
 //!   * 不含任何网络 / 业务逻辑；
 //!   * 每条指令向 stdout 输出一行结果 JSON；
 //!   * 解析失败或注入异常写 stderr，然后继续等待下一条指令（不退出）；
 //!   * 长文本自动分片 + 片间延时，规避部分软件的丢字符问题；
 //!   * 收到 SIGTERM / SIGINT 时安全退出。
+//!   * 对齐模式（v0.3.0+）支持 `expect_focus` 校验：焦点漂移时拒绝注入
+//!     并回 `focus_drift` + 当前焦点，让 Node 端暂停会话保护目标输入框。
+//!     仅 Windows / Linux（X11）支持；macOS 暂时无法识别焦点，行为同旧版
+//!     ——优雅降级，绝不因识别能力缺失而阻塞合法注入。
 //!
 //! 协议（Node -> Rust，stdin）:  {"action":"type_text","text":"..."}
 //!       （Node -> Rust，stdin）:  {"action":"backspace","count":N}
@@ -51,6 +55,8 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use serde::Deserialize;
 use serde_json::json;
 
+mod focus;
+
 /// 单次注入的最大字符数。超过则分片，片间让出时间给目标程序的消息循环。
 /// 取值偏小是刻意的：部分 IDE / 终端在一口气注入大量字符时会丢字。
 const CHUNK_SIZE: usize = 32;
@@ -75,6 +81,24 @@ struct Command {
     text: Option<String>,
     #[serde(default)]
     count: Option<usize>,
+    /// 对齐模式：期望的焦点标识（首条成功注入的窗口）。与 `focus::current_focus()`
+    /// 不符则拒绝注入，避免打进用户已经切走的输入框。空 / None = 不校验。
+    #[serde(default)]
+    expect_focus: Option<String>,
+}
+
+/// 注入前的焦点校验。
+/// 返回 Some(cur) = 焦点漂移（未注入，调用方应回 focus_drift）；
+/// 返回 None = 通过校验（焦点匹配，或未绑定，或平台无法识别）。
+fn check_focus(expect: &Option<String>) -> Option<String> {
+    let expected = expect.as_deref()?;
+    if expected.is_empty() {
+        return None;
+    }
+    match focus::current_focus() {
+        Some(cur) if cur != expected => Some(cur),
+        _ => None,
+    }
 }
 
 /// 向 stdout 写一行 JSON 结果。
@@ -214,6 +238,11 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
 
     match cmd.action.as_str() {
         "type_text" => {
+            // 焦点漂移校验：先于注入，避免打进用户已切走的输入框
+            if let Some(cur) = check_focus(&cmd.expect_focus) {
+                emit(json!({ "ok": false, "msg": "focus_drift", "focus": cur }));
+                return;
+            }
             let text = cmd.text.unwrap_or_default();
 
             // 懒初始化并复用 Enigo 连接：
@@ -232,7 +261,7 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
 
             let instance = enigo.as_mut().expect("enigo just initialized");
             match type_text(instance, &text) {
-                Ok(n) => emit(json!({ "ok": true, "msg": "input complete", "chars": n })),
+                Ok(n) => emit(json!({ "ok": true, "msg": "input complete", "chars": n, "focus": focus::current_focus() })),
                 Err(reason) => {
                     log_err(&reason);
                     // 注入失败可能意味着底层连接已损坏，丢弃实例以便下条重建
@@ -242,9 +271,14 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
             }
         }
         "backspace" => {
+            // 焦点漂移校验同样先于退格：对着别的窗口退格 = 误删用户文件
+            if let Some(cur) = check_focus(&cmd.expect_focus) {
+                emit(json!({ "ok": false, "msg": "focus_drift", "focus": cur }));
+                return;
+            }
             let count = clamp_backspace_count(cmd.count);
             if count == 0 {
-                emit(json!({ "ok": true, "msg": "backspace complete", "count": 0 }));
+                emit(json!({ "ok": true, "msg": "backspace complete", "count": 0, "focus": focus::current_focus() }));
                 return;
             }
 
@@ -261,7 +295,7 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
 
             let instance = enigo.as_mut().expect("enigo just initialized");
             match backspace_n(instance, count) {
-                Ok(n) => emit(json!({ "ok": true, "msg": "backspace complete", "count": n })),
+                Ok(n) => emit(json!({ "ok": true, "msg": "backspace complete", "count": n, "focus": focus::current_focus() })),
                 Err(reason) => {
                     log_err(&reason);
                     *enigo = None;
@@ -273,6 +307,11 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
             // 心跳指令：仅用于 Node 侧判断子进程是否卡死。
             // 注意：这里不构造 Enigo，避免在无图形环境下心跳也失败。
             emit(json!({ "ok": true, "msg": "pong" }));
+        }
+        "focus" => {
+            // 对齐模式焦点轮询指令：Node 端在挂起期间每 2s 询问一次，
+            // 焦点回到绑定目标后 Node 自动恢复对齐注入。
+            emit(json!({ "ok": true, "focus": focus::current_focus() }));
         }
         other => {
             let msg = format!("unknown action: {other}");

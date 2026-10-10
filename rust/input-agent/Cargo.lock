@@ -133,6 +133,8 @@ dependencies = [
  "enigo",
  "serde",
  "serde_json",
+ "windows-sys",
+ "x11rb",
 ]
 
 [[package]]
