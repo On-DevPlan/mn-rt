@@ -222,12 +222,30 @@ curl -X POST http://127.0.0.1:8899/push \
 ```jsonc
 // Node → Rust
 { "action": "type_text", "text": "要注入的文本" }
+{ "action": "type_text", "text": "第一行\n第二行", "enter_mode": "shift_enter" }
+{ "action": "backspace", "count": 3 }
+{ "action": "hotkey", "key": "return", "modifiers": ["shift"] }
 { "action": "ping" }
 
 // Rust → Node
 { "ok": true,  "msg": "input complete", "chars": 8 }
+{ "ok": true,  "msg": "hotkey complete", "combo": "shift+return" }
 { "ok": false, "msg": "错误原因" }
 ```
+
+#### 换行与组合键（v0.5.0+）
+
+微信等「Enter=发送」的输入框里，把 `\n` 当普通字符注入会被当成发送。两种解法：
+
+- **`enter_mode`**（type_text 的可选字段）：`\n` 不再混入字符流，改为按段注入后在段间显式敲键。
+  `enter` = 单击 Enter；`shift_enter` = 敲 Shift+Enter（多数 IM 的换行快捷键）；缺省 `raw` = 旧行为。
+  CLI 侧对应 `--enter-mode` 参数 / `REMOTETYPE_ENTER_MODE` 环境变量 / 配置文件 `enterMode` 字段。
+- **`hotkey` 指令**：注入任意「修饰键 + 主键」组合（Ctrl+A 全选、Shift+Enter…）。
+  主键支持 `return` / `tab` / `escape` / 方向键 / `f1`-`f12` / 单字符（字母数字）；
+  修饰键支持 `shift` / `ctrl` / `alt` / `meta`（别名 `option`、`cmd`、`win`、`super`）。
+  Node 侧调用：`agent.hotkey('return', ['shift'])`。
+
+两者失败都不重试（失败的按键可能实际已送达，重试在聊天框里等于误发消息），由上层决定整条重发。
 
 ---
 
@@ -353,7 +371,7 @@ bash test/e2e.sh 2 6      # 只跑用例 2 和 6
 
 仓库 `mn-rt` 配有三个工作流：
 
-**`build-input-agent.yml`** — 4 平台并行编译 Rust 注入引擎（win32-x64 / darwin-x64 / darwin-arm64 / linux-x64），产出 `SHA256SUMS.txt`，并在 Linux 上跑冒烟测试（ping / 非法 JSON / 未知 action 后进程存活 / 空输入）。push tag `v*` 时自动创建 GitHub Release 并上传产物。
+**`build-input-agent.yml`** — 4 平台并行编译 Rust 注入引擎（win32-x64 / darwin-x64 / darwin-arm64 / linux-x64），产出 `SHA256SUMS.txt`，并在 Linux 上跑冒烟测试（ping / 非法 JSON / 未知 action 后进程存活 / 空输入 / hotkey 组合键 / 非法 enter_mode / shift_enter 换行链路）。push tag `v*` 时自动创建 GitHub Release 并上传产物。
 
 **`node-ci.yml`** — JS 侧检查：
 
@@ -406,7 +424,7 @@ https://github.com/ZHLX2005/mn-rt/releases/download/v0.1.0/linux-x64/input-agent
 内置默认值  <  配置文件  <  环境变量  <  CLI 参数
 ```
 
-环境变量：`REMOTETYPE_URL`、`REMOTETYPE_CLIENT_ID`、`REMOTETYPE_HOME`、`REMOTETYPE_LOG_LEVEL`。
+环境变量：`REMOTETYPE_URL`、`REMOTETYPE_CLIENT_ID`、`REMOTETYPE_HOME`、`REMOTETYPE_LOG_LEVEL`、`REMOTETYPE_ENTER_MODE`。
 
 ---
 

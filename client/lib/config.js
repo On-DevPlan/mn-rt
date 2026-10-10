@@ -129,6 +129,10 @@ function loadConfig(flags = {}) {
     alignKey: flags.key ?? env.REMOTETYPE_KEY ?? file.alignKey ?? null,
     // 注册门禁 token（服务器设 RT_TOKEN 后必须携带同一值才能注册）
     token: flags.token ?? env.REMOTETYPE_TOKEN ?? env.RT_TOKEN ?? file.token ?? null,
+    // 文本中 '\n' 的换行方式（透传 rust 的 enter_mode）：
+    //   'raw'（默认）旧行为；'enter' 单击 Enter；'shift_enter' 敲 Shift+Enter。
+    //   后两者用于「Enter=发送」的输入框（IM、Web 聊天框）；非法值由 rust 拒绝并报错。
+    enterMode: flags.enterMode ?? env.REMOTETYPE_ENTER_MODE ?? file.enterMode ?? 'raw',
     configDir: configDir(),
     configFile: configFile(),
     target,

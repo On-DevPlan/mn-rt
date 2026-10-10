@@ -71,6 +71,8 @@ ${C.bold}选项${C.reset}
   --plain                切回旧普通模式：接收整句明文推送（无对齐、无加密）
   --align                （已默认开启，保留兼容；与 --plain 同给时 --plain 优先）
   --token <TOKEN>        注册门禁 token（服务器设 RT_TOKEN 后两端都必须携带同一值）
+  --enter-mode <mode>    文本换行的注入方式：raw（默认）| enter | shift_enter。
+                         微信等「Enter=发送」的输入框用 shift_enter 才能换行
   --log-level <level>    debug | info | warn | error（默认 info）
   --max-queue <n>        本地消息队列上限（默认 100）
   --max-text <n>         单条文本最大长度，超出截断（默认 5000）
@@ -89,6 +91,15 @@ ${C.bold}示例${C.reset}
 
 function printVersion() {
   say(`remotetype v${pkg.version} (${process.platform}-${process.arch}, node ${process.version})`);
+}
+
+/**
+ * cfg.enterMode → typeText 的 opts 参数。
+ * 'raw' / 缺省时不传字段，协议报文保持与旧版一致；
+ * 非法值不在此拦截——rust 会拒绝并给出明确报错（宁可立即失败，不做静默回退）。
+ */
+function enterModeOpts(cfg) {
+  return cfg.enterMode && cfg.enterMode !== 'raw' ? { enterMode: cfg.enterMode } : {};
 }
 
 /**
@@ -316,7 +327,7 @@ async function cmdServe(cfg) {
       });
 
       try {
-        const res = await agent.typeText(cleaned.text);
+        const res = await agent.typeText(cleaned.text, undefined, null, enterModeOpts(cfg));
         const durationMs = Date.now() - startedAt;
         if (res?.ok) {
           logger.info('注入完成', { durationMs, textLen: cleaned.text.length });
@@ -554,7 +565,7 @@ async function cmdTest(cfg, positional) {
   try {
     agent.start();
     const startedAt = Date.now();
-    const res = await agent.typeText(cleaned.text);
+    const res = await agent.typeText(cleaned.text, undefined, null, enterModeOpts(cfg));
     const durationMs = Date.now() - startedAt;
 
     if (res?.ok) {

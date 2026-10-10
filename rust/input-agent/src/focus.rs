@@ -35,7 +35,9 @@ pub fn current_focus() -> Option<String> {
 #[cfg(target_os = "windows")]
 fn windows_focus() -> Option<String> {
     use windows_sys::Win32::Foundation::HWND;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetGUIThreadInfo, GUITHREADINFO};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetGUIThreadInfo, GUITHREADINFO,
+    };
 
     unsafe {
         // 前台窗口本身先取出来：hwndFocus 为空时（少数全屏/游戏窗口）用它兜底
@@ -51,7 +53,11 @@ fn windows_focus() -> Option<String> {
         if GetGUIThreadInfo(0, &mut info) == 0 {
             return None;
         }
-        let target: HWND = if info.hwndFocus.is_null() { fg } else { info.hwndFocus };
+        let target: HWND = if info.hwndFocus.is_null() {
+            fg
+        } else {
+            info.hwndFocus
+        };
         Some(format!("win:{target:p}"))
     }
 }

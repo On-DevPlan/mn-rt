@@ -326,11 +326,36 @@ class AgentManager {
     });
   }
 
-  /** 便捷方法：注入文本。`expectFocus` 对齐模式校验：与当前焦点不符则 rust 拒注并回 focus_drift。 */
-  async typeText(text, timeoutMs, expectFocus = null) {
+  /**
+   * 便捷方法：注入文本。`expectFocus` 对齐模式校验：与当前焦点不符则 rust 拒注并回 focus_drift。
+   * `opts.enterMode`：文本中 '\n' 的换行方式，透传给 rust 的 enter_mode 字段：
+   *   * 'enter'       —— '\n' 处显式单击 Enter；
+   *   * 'shift_enter' —— '\n' 处敲 Shift+Enter（「Enter=发送」的输入框里换行）；
+   *   * 缺省          —— 旧行为（'\n' 作为普通字符注入）。
+   */
+  async typeText(text, timeoutMs, expectFocus = null, { enterMode } = {}) {
     const payload = { action: 'type_text', text };
     if (expectFocus) payload.expect_focus = expectFocus;
+    if (enterMode) payload.enter_mode = enterMode;
     return this.send(payload, timeoutMs);
+  }
+
+  /** 便捷方法：向焦点输入框发送 N 次退格。`expectFocus` 同上：漂移时拒退格。 */
+  async backspace(count, timeoutMs, expectFocus = null) {
+    const payload = { action: 'backspace', count };
+    if (expectFocus) payload.expect_focus = expectFocus;
+    return this.send(payload, timeoutMs);
+  }
+
+  /**
+   * 便捷方法：注入组合键（如 hotkey('return', ['shift']) = Shift+Enter）。
+   * @param {string} key          主键名：return / tab / escape / backspace / delete /
+   *                              space / up / down / left / right / home / end /
+   *                              pageup / pagedown / insert / f1-f12 / 单字符（a、5…）
+   * @param {string[]} [modifiers] 修饰键：shift / ctrl / alt / meta（含别名 option、cmd、win、super）
+   */
+  async hotkey(key, modifiers = [], timeoutMs) {
+    return this.send({ action: 'hotkey', key, modifiers }, timeoutMs);
   }
 
   /** 便捷方法：向焦点输入框发送 N 次退格。`expectFocus` 同上：漂移时拒退格。 */
