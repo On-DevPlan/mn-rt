@@ -63,7 +63,10 @@
 //! 重试有多发风险（聊天框里 = 误发消息），宁少勿多，由上层决定整条重发。
 
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+// AtomicUsize 仅 unix 信号处理用到，其他平台不引入避免 unused 警告
+#[cfg(unix)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -389,7 +392,8 @@ fn parse_key_name(name: &str) -> Result<Key, String> {
         "backspace" => Ok(Key::Backspace),
         "delete" | "del" => Ok(Key::Delete),
         "space" => Ok(Key::Space),
-        "insert" => Ok(Key::Insert),
+        // 注意：不映射 "insert"——enigo 0.6.1 的 Key::Insert 仅 Windows/Linux 有，
+        // macOS 侧编译直接报 E0599；当前也无任何调用方使用。
         "home" => Ok(Key::Home),
         "end" => Ok(Key::End),
         "pageup" => Ok(Key::PageUp),
