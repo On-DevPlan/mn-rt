@@ -353,7 +353,12 @@ bash test/e2e.sh 2 6      # 只跑用例 2 和 6
 发布 = bump `client/package.json` 版本 + push 到 main，其余全部由 CI 完成：
 
 1. `fuck-npm.yml` 自动打 git tag `v<版本>` 并 `npm publish --provenance`（npm 上已有该版本则幂等跳过）；
-2. tag 触发 `build-input-agent.yml`：4 平台编译 + 自动创建 GitHub Release、上传各平台产物。
+2. **手动补一步编译发布**：GitHub 防递归机制下，GITHUB_TOKEN 推的 tag 不会触发其他工作流，
+   需在 tag 上手动 dispatch（该 run 做 4 平台编译 + 自动创建 GitHub Release、上传产物）：
+
+   ```bash
+   gh workflow run build-input-agent.yml --ref v0.1.x   # 换成实际版本
+   ```
 
 ```bash
 # 唯一的手动步骤：改 client/package.json 的 version 后
