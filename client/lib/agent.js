@@ -326,16 +326,18 @@ class AgentManager {
     });
   }
 
-  /** 便捷方法：注入文本。 */
-  async typeText(text, timeoutMs) {
-    const res = await this.send({ action: 'type_text', text }, timeoutMs);
-    return res;
+  /** 便捷方法：注入文本。`expectFocus` 对齐模式校验：与当前焦点不符则 rust 拒注并回 focus_drift。 */
+  async typeText(text, timeoutMs, expectFocus = null) {
+    const payload = { action: 'type_text', text };
+    if (expectFocus) payload.expect_focus = expectFocus;
+    return this.send(payload, timeoutMs);
   }
 
-  /** 便捷方法：向焦点输入框发送 N 次退格（relay 对齐模式的删除原语）。 */
-  async backspace(count, timeoutMs) {
-    const res = await this.send({ action: 'backspace', count }, timeoutMs);
-    return res;
+  /** 便捷方法：向焦点输入框发送 N 次退格。`expectFocus` 同上：漂移时拒退格。 */
+  async backspace(count, timeoutMs, expectFocus = null) {
+    const payload = { action: 'backspace', count };
+    if (expectFocus) payload.expect_focus = expectFocus;
+    return this.send(payload, timeoutMs);
   }
 
   /** 优雅关闭：结束 stdin -> 等待退出 -> 超时强杀。 */

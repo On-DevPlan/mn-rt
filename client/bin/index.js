@@ -230,6 +230,59 @@ async function cmdServe(cfg) {
   // 本批按键计划中注入失败过的 seq：commit 到来时走 commitFailed
   // （mirror 不推进、重试），而不是 commitApplied（误以为已注入 → 永久错位）
   const failedAlignSeqs = new Set();
+  // 焦点绑定：首个成功注入的窗口标识记为对齐目标，之后每条 op 携带
+  // expect_focus 校验；rust 拒注时挂起 align 会话+通知手机，避免
+  // 电脑切焦点后误删误打。新会话（对齐模式）建立时重置。
+  let focusTarget = null;
+  let focusPaused = false;
+  let focusPollTimer = null;
+
+  /** 焦点匹配成功：首次绑定，后续直接用。每次顺手更新到目标（target 句柄可能跨进程稳定）。 */
+  function bindFocus(current) {
+    if (current && !focusTarget) {
+      focusTarget = current;
+      logger.info('焦点已绑定（首个注入目标）', { target: focusTarget });
+    }
+  }
+
+  /** 焦点漂移：挂起 align 会话 + 通知手机 + 启动轮询。同一 seq 走 commitFailed 不推进 mirror。 */
+  function handleFocusDrift(seq, currentFocus) {
+    if (focusPaused) return; // 已经在挂起，重复漂移不重复发 ctrl
+    focusPaused = true;
+    logger.warn('焦点漂移，注入已暂停', { target: focusTarget, current: currentFocus, seq });
+    if (seq !== undefined) failedAlignSeqs.add(seq);
+    if (align) align.pause();
+    // 通知手机：把 ctrl 信封通过 sendAck 同一个 transport 推上去（共用 c2p 方向）
+    if (align?.sendCtrl) {
+      align.sendCtrl('focus-paused').catch((e) => logger.warn('ctrl 通知失败', { error: e.message }));
+    }
+    // 启动轮询：每 2s 询问 rust 当前焦点，回到目标则恢复
+    focusPollTimer = setInterval(() => {
+      agent.send({ action: 'focus' }, cfg.requestTimeoutMs)
+        .then((res) => {
+          if (res?.focus && res.focus === focusTarget) {
+            resumeFromFocus();
+          }
+        })
+        .catch((e) => logger.debug('焦点轮询失败', { error: e.message }));
+    }, 2000);
+    focusPollTimer.unref?.();
+  }
+
+  /** 焦点回归：取消轮询、通知手机、恢复 align 会话（会重新 dispatch 当前 desired）。 */
+  function resumeFromFocus() {
+    if (!focusPaused) return;
+    focusPaused = false;
+    if (focusPollTimer) {
+      clearInterval(focusPollTimer);
+      focusPollTimer = null;
+    }
+    logger.info('焦点已恢复，注入恢复', { target: focusTarget });
+    if (align?.sendCtrl) {
+      align.sendCtrl('focus-resumed').catch((e) => logger.warn('ctrl 通知失败', { error: e.message }));
+    }
+    if (align) align.resume();
+  }
 
   // ---- 消息队列：串行消费，逐条注入 ----
   // serve 明文模式 item = {text, clientId}；对齐模式 item =
@@ -255,11 +308,16 @@ async function cmdServe(cfg) {
 
       // backspace：删除原语（relay 对齐模式）
       if (item.op === 'backspace') {
+        const expectFocus = meta.source === 'align' ? focusTarget : null;
         try {
-          const res = await agent.backspace(item.count);
+          const res = await agent.backspace(item.count, cfg.requestTimeoutMs, expectFocus);
           if (res?.ok) {
             logger.debug('退格完成', { count: item.count, queueWaitMs });
             store.append({ status: 'backspaced', count: item.count, source: meta.source, seq: item.seq });
+            if (meta.source === 'align') bindFocus(res.focus);
+          } else if (res?.msg === 'focus_drift') {
+            handleFocusDrift(item.seq, res.focus);
+            store.append({ status: 'backspace_focus_drift', count: item.count, source: meta.source, seq: item.seq, currentFocus: res.focus });
           } else {
             logger.error('退格失败', { count: item.count, msg: res?.msg });
             if (item.seq !== undefined) failedAlignSeqs.add(item.seq);
@@ -316,10 +374,12 @@ async function cmdServe(cfg) {
       });
 
       try {
-        const res = await agent.typeText(cleaned.text);
+        const expectFocus = isAlignSource ? focusTarget : null;
+        const res = await agent.typeText(cleaned.text, cfg.requestTimeoutMs, expectFocus);
         const durationMs = Date.now() - startedAt;
         if (res?.ok) {
           logger.info('注入完成', { durationMs, textLen: cleaned.text.length });
+          if (isAlignSource) bindFocus(res.focus);
           store.append({
             text: cleaned.text,
             status: 'injected',
@@ -328,6 +388,17 @@ async function cmdServe(cfg) {
             queueWaitMs,
             durationMs,
             truncated: Boolean(cleaned.truncated),
+          });
+        } else if (res?.msg === 'focus_drift' && isAlignSource) {
+          handleFocusDrift(item.seq, res.focus);
+          store.append({
+            text: cleaned.text,
+            status: 'inject_focus_drift',
+            clientId: item.clientId,
+            source: meta.source,
+            queueWaitMs,
+            durationMs,
+            currentFocus: res.focus,
           });
         } else {
           logger.error('注入失败', { msg: res?.msg, durationMs });

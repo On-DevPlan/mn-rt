@@ -1,6 +1,6 @@
 {
   "name": "@ondevplann/remotetype",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "RemoteType PC 客户端：npx 一键启动，接收手机端语音识别文本并注入到当前焦点输入框",
   "bin": {
     "remotetype": "./bin/index.js"
@@ -22,8 +22,10 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "@ondevplann/input-agent-win32-x64": "0.1.0",
-    "@ondevplann/input-agent-linux-x64": "0.1.0"
+    "@ondevplann/input-agent-win32-x64": "0.2.0",
+    "@ondevplann/input-agent-darwin-x64": "0.2.0",
+    "@ondevplann/input-agent-darwin-arm64": "0.2.0",
+    "@ondevplann/input-agent-linux-x64": "0.2.0"
   },
   "engines": {
     "node": ">=18.0.0"
