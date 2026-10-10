@@ -13,7 +13,8 @@ on:
     branches: [main]
 
 permissions:
-  contents: write   # 写 tag 需要；不要省
+  contents: write    # 写 tag 需要；不要省
+  id-token: write    # npm --provenance 的 OIDC 签名需要；缺了会在 publish 一步报 EUSAGE
 
 defaults:
   run:

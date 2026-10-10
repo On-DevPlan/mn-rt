@@ -11,10 +11,11 @@ data/
 logs/
 *.log
 
-# 本地生成的二进制（CI 产出，不入库）
-# 保留 client/binaries/linux-x64/input-agent 作为本地测试用；
-# 正式分发包由 GitHub Actions 构建后上传到 Release。
-client/binaries/win32-x64/
+# 二进制入库规则（npm 分发调整后）：
+# client/binaries/win32-x64、linux-x64 入库 —— npm 主包 tarball 需要自带平台二进制，
+# CI checkout 里必须存在（0.1.3 曾因 .exe 被忽略导致 CI 包缺 win32 引擎）。
+# rust 代码变更时随发版流程一并刷新入库副本；
+# darwin 不入库（主包不含 darwin 二进制，由 Release 下载兜底）。
 client/binaries/darwin-x64/
 client/binaries/darwin-arm64/
 
