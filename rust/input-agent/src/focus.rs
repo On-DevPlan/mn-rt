@@ -59,15 +59,17 @@ fn windows_focus() -> Option<String> {
 #[cfg(target_os = "linux")]
 fn linux_focus() -> Option<String> {
     use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt;
 
     // 每次新建连接：语音输入是低频场景（250ms 防抖 + 快照粒度），
     // Unix socket 连接开销 ~1ms，不值得为缓存引入生命周期管理
     let (conn, screen_num) = x11rb::connect(None).ok()?;
     let root = conn.setup().roots.get(screen_num)?.root;
     let reply = conn.get_input_focus().ok()?.reply().ok()?;
+    let focus = reply.focus;
     // 0 = X11 None（无焦点），1 = PointerRoot：都视为「焦点不可判定」
-    if reply.focus <= 1 || reply.focus == root {
+    if focus.0 <= 1 || focus == root {
         return None;
     }
-    Some(format!("x11:{:x}", reply.focus))
+    Some(format!("x11:{:x}", focus.0))
 }
