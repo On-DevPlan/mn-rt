@@ -104,6 +104,24 @@ test('非字符串被拒', () => {
   assert.strictEqual(sanitize(12345).reason, 'not_a_string');
 });
 
+test('keepWhitespace：纯空白保留（对齐模式，IME 自动换行不算失败）', () => {
+  const r = sanitize('   \n\t ', { keepWhitespace: true });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.text, '   \n\t ');
+  // 含换行的正常文本不受影响
+  assert.strictEqual(sanitize('你好\n不要', { keepWhitespace: true }).text, '你好\n不要');
+});
+
+test('keepWhitespace：整条仅不可见字符 → ok 且空串，由调用方决定无操作', () => {
+  const r = sanitize('​‍﻿', { keepWhitespace: true });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.text, '');
+});
+
+test('keepWhitespace 不影响默认路径', () => {
+  assert.strictEqual(sanitize('   \n\t ', { keepWhitespace: false }).ok, false);
+});
+
 test('超长截断并标记 truncated', () => {
   const r = sanitize('字'.repeat(DEFAULT_MAX_LENGTH + 100));
   assert.strictEqual(r.truncated, true);

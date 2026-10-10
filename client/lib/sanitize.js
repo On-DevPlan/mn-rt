@@ -32,10 +32,14 @@ function isInvisible(c) {
  * @param {string} raw
  * @param {object} [opts]
  * @param {number} [opts.maxLength]
+ * @param {boolean} [opts.keepWhitespace] 保留纯空白文本（对齐模式用：
+ *   换行/空格是手机输入框的真实内容，整条空白不算「空文本」；
+ *   返回 ok:true 且 text 可能为空串，由调用方决定是否为无操作）
  * @returns {{ok:boolean, text:string, reason?:string, truncated?:boolean, originalLength?:number}}
  */
 function sanitize(raw, opts = {}) {
   const maxLength = opts.maxLength ?? DEFAULT_MAX_LENGTH;
+  const keepWhitespace = opts.keepWhitespace === true;
 
   if (typeof raw !== 'string') {
     return { ok: false, text: '', reason: 'not_a_string' };
@@ -52,8 +56,8 @@ function sanitize(raw, opts = {}) {
   // 2) 统一换行，避免 \r\n 造成目标程序出现多余字符
   text = text.replace(/\r\n?/g, '\n');
 
-  // 3) 空文本丢弃
-  if (text.trim().length === 0) {
+  // 3) 空文本丢弃（keepWhitespace 时跳过：空白是对齐语义下的有效内容）
+  if (!keepWhitespace && text.trim().length === 0) {
     return { ok: false, text: '', reason: 'empty_after_clean', originalLength };
   }
 

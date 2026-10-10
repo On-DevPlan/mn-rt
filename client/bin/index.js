@@ -274,8 +274,14 @@ async function cmdServe(cfg) {
       }
 
       // type：常规文本注入（serve 与 relay 共用，relay 的 text 是 diff 出的增量）
-      // 二次预处理：即便上游已过滤，这里仍是最后一道防线
-      const cleaned = sanitize(item.text, { maxLength: cfg.maxTextLength });
+      // 二次预处理：即便上游已过滤，这里仍是最后一道防线。
+      // 对齐模式保留纯空白：换行/空格是手机输入框的真实内容（IME 自动插入的
+      // 换行不该被判失败挂起整批计划），见 sanitize 的 keepWhitespace。
+      const isAlignSource = meta.source === 'align';
+      const cleaned = sanitize(item.text, {
+        maxLength: cfg.maxTextLength,
+        keepWhitespace: isAlignSource,
+      });
       if (!cleaned.ok) {
         logger.warn('文本预处理后丢弃', { reason: cleaned.reason, clientId: item.clientId });
         if (meta.source === 'align' && item.seq !== undefined) failedAlignSeqs.add(item.seq);
@@ -287,6 +293,11 @@ async function cmdServe(cfg) {
           source: meta.source,
           queueWaitMs,
         });
+        return;
+      }
+      if (isAlignSource && cleaned.text.length === 0) {
+        // 整条只含不可见字符：无可注入内容，也不算失败——commit 仍会推进 mirror
+        logger.debug('对齐空操作（仅不可见字符），跳过注入', { seq: item.seq });
         return;
       }
       if (cleaned.truncated) {
