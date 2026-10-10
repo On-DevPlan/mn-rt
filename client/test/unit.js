@@ -586,6 +586,65 @@ test('align：commit 后发 ACK 信封（方向 c2p，手机可解）', () => {
   assert.strictEqual(plain.applied_seq, 1);
 });
 
+test('align：发送模式 Enter 提交后 mirror 归零（目标框已随消息清空）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好\n', 1, 's1', 'phone-e2e', 'enter'));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  align.commitApplied(1, '你好\n');
+  // IM 发出消息后输入框为空：mirror 必须归零与手机端清空对齐，
+  // 否则下一条会先回删整条已发送内容
+  assert.strictEqual(align.mirror, '');
+  assert.strictEqual(align.desiredText, null);
+});
+
+test('align：发送模式归零不重打——无新快照时不得重复注入', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '第一\n', 1, 's1', 'phone-e2e', 'enter'));
+  align.commitApplied(1, '第一\n');
+  ops.length = 0;
+  // 无新快照：归零后 desiredText 为 null，不应触发重新 dispatch 重打一遍
+  assert.deepStrictEqual(ops, []);
+  // 新消息正常从空 mirror 开始
+  align.handleIncoming(sealedSync(align, '第二\n', 2, 's1', 'phone-e2e', 'enter'));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(ops[0].text, '第二\n');
+  align.commitApplied(2, '第二\n');
+  assert.strictEqual(align.mirror, '');
+});
+
+test('align：发送模式归零——busy 期间手机清空快照已到，commit 后无重打', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好\n', 1, 's1', 'phone-e2e', 'enter'));
+  // 注入进行中手机已清空（flush 后立刻发空快照）
+  align.handleIncoming(sealedSync(align, '', 2, 's1', 'phone-e2e', 'enter'));
+  align.commitApplied(1, '你好\n');
+  ops.length = 0;
+  // desired='' === mirror=''：不再产出任何 op
+  assert.deepStrictEqual(ops, []);
+  assert.strictEqual(align.mirror, '');
+});
+
+test('align：换行模式不归零（内容继续累积）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好\n', 1, 's1', 'phone-e2e', 'shift_enter'));
+  align.commitApplied(1, '你好\n');
+  assert.strictEqual(align.mirror, '你好\n');
+});
+
+test('align：发送模式未到句尾不归零（普通中途注入）', () => {
+  const { align } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, 'abc', 1, 's1', 'phone-e2e', 'enter'));
+  align.commitApplied(1, 'abc');
+  assert.strictEqual(align.mirror, 'abc');
+});
+
+test('align：老手机（无 enterMode）行尾不归零（行为不变）', () => {
+  const { align } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedSync(align, '你好\n', 1));
+  align.commitApplied(1, '你好\n');
+  assert.strictEqual(align.mirror, '你好\n');
+});
+
 // ================= resolveEnterMode：手机字段 > CLI 配置 > raw =================
 
 test('resolveEnterMode：手机字段优先于 CLI 配置', () => {

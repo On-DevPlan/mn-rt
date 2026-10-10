@@ -192,15 +192,26 @@ class RtAlignSession extends EventEmitter {
 
   // ================= 出向 / 推进 =================
 
-  /** 上层确认某批按键已成功注入。推进 mirror、发 ACK、续跑剩余 desired。 */
+  /**
+   * 上层确认某批按键已成功注入。推进 mirror、发 ACK、续跑剩余 desired。
+   *
+   * 发送模式（enter）下快照以 '\n' 结尾 = 手机端「发送」：目标 IM 发出消息后
+   * 输入框清空，mirror 必须归零与手机端的清空对齐——否则下一条会先回删整条
+   * 已发送内容。归零时若没有更新的快照在途，同时清 desiredText：否则
+   * 「mirror 归零 vs desired 仍是刚发文本」会触发重打，造成重复发送。
+   */
   commitApplied(seq, text) {
     if (!this.busy) return;
     this.mirror = text;
+    if (this.enterMode === 'enter' && typeof text === 'string' && text.endsWith('\n')) {
+      this.mirror = '';
+      if (this.desiredText === text) this.desiredText = null;
+    }
     this.busy = false;
     this.busySince = 0;
     this.pendingFails = 0;
     this._sendAck(seq);
-    if (this.desiredText !== this.mirror) this._dispatch();
+    if (this.desiredText !== null && this.desiredText !== this.mirror) this._dispatch();
   }
 
   /**
