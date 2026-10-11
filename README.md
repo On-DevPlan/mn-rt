@@ -36,7 +36,7 @@ PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经�
 ### 用法
 
 ```bash
-# ── 推荐：统一登录（免掉人工复制 key）──
+# ── 推荐：统一登录（免掉人工复制 key）· 0.5.3 起 ──
 npx nx-rt auth login --url ws://<server>:8790/ws   # 弹浏览器登录一次
 npx nx-rt                                         # 之后裸命令直连，密钥由服务端下发
 npx nx-rt auth status                             # 我是谁 / 令牌还剩多久 / 本机登记上了吗
