@@ -72,6 +72,33 @@ test('RT_AUTH_ENABLED 必须认 1/yes/on；认不出的值抛错而不是静默�
   assert.throws(() => withEnv('ture', () => loadConfig(['--port', '0'])), /RT_AUTH_ENABLED 取值无法识别/);
 });
 
+test('默认 redirectUri 必须是认证中心白名单放行的形状', () => {
+  // 白名单规则：回环通配只放行 `http://127.0.0.1:*/callback`——
+  // 主机限回环、端口通配、**路径逐字 /callback**；公网地址一律不许通配。
+  // 所以"把本服务的 /auth/oidc/callback 当默认值"看着合理，实际一条都不匹配，
+  // 症状是配置全对、authorize 一直 400，离真正的因由隔了三次跳转。
+  const { loadConfig } = require('../src/server');
+  const prev = process.env.RT_AUTH_REDIRECT_URI;
+  const prevPort = process.env.RT_PORT;
+  try {
+    delete process.env.RT_AUTH_REDIRECT_URI;
+    process.env.RT_PORT = '8790';
+    const cfg = loadConfig(['--port', '8790']);
+    assert.equal(cfg.auth.redirectUri, 'http://127.0.0.1:8790/callback');
+    assert.match(
+      cfg.auth.redirectUri,
+      /^http:\/\/(127\.0\.0\.1|localhost):\d+\/callback$/,
+      '必须落在回环通配那一项里',
+    );
+    // 显式配置永远优先于默认（换端口、换部署形态时不用改代码）
+    process.env.RT_AUTH_REDIRECT_URI = 'http://localhost:9999/callback';
+    assert.equal(loadConfig(['--port', '8790']).auth.redirectUri, 'http://localhost:9999/callback');
+  } finally {
+    if (prev === undefined) delete process.env.RT_AUTH_REDIRECT_URI; else process.env.RT_AUTH_REDIRECT_URI = prev;
+    if (prevPort === undefined) delete process.env.RT_PORT; else process.env.RT_PORT = prevPort;
+  }
+});
+
 test('开启统一登录但未配签名密钥 → 拒绝启动', () => {
   assert.throws(
     () => createServer({

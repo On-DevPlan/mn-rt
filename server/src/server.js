@@ -22,7 +22,6 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { WebSocketServer } = require('ws');
 const { Logger } = require('./logger');
 const { RecordStore } = require('./store');
@@ -136,8 +135,21 @@ function loadConfig(argv = process.argv.slice(2)) {
       // 必须与认证中心 IDP_ISSUER 逐字一致，且是**浏览器可达**地址
       issuer: cli.idpIssuer ?? process.env.RT_AUTH_ISSUER ?? 'http://47.110.80.47:8082',
       clientId: cli.authClientId ?? process.env.RT_AUTH_CLIENT_ID ?? 'mn-rt',
-      // 本服务的授权回调页（静态页，与 dev_ctr_hello 的 oidc-login.html 同形）
-      redirectUri: cli.authRedirectUri ?? process.env.RT_AUTH_REDIRECT_URI ?? null,
+      // 授权回调地址：这是**绑定用的标签**，不是任何人会去打开的页面。
+      //
+      // 本服务只有两类发起方，都不经过浏览器跳转到这里：
+      //   ① PC CLI 自己在 127.0.0.1 随机端口收码（那是真监听，真的收包）；
+      //   ② 手机端 fr 用已有的统一登录态直接调 /oauth2/auth + 提交 consent，
+      //      授权码从 302 的 Location 里取出来再 POST 给本服务——同样没有浏览器落地。
+      // 但 redirect_uri 在协议里必须在客户端白名单内，且 authorize 与换 token 两次
+      // 必须逐字相同，所以这里给一个稳定值让两端共用。
+      //
+      // 形状被认证中心的规则钉死：回环通配只放行 `http://127.0.0.1:*/callback`
+      // （主机限回环、端口通配、**路径必须逐字 /callback**），公网地址则不许通配。
+      // 所以不能写成本服务的 /auth/oidc/callback——那条根本不匹配白名单，
+      // 表现是"配置看起来都对，authorize 一直 400"。
+      redirectUri: cli.authRedirectUri ?? process.env.RT_AUTH_REDIRECT_URI
+        ?? `http://127.0.0.1:${port}/callback`,
       scopes: (cli.authScopes ?? process.env.RT_AUTH_SCOPES ?? 'openid profile email')
         .split(' ').filter(Boolean),
       // 设备令牌签名密钥。开启统一登录却没配它属于**配置错误**，
@@ -170,10 +182,10 @@ function createServer(userConfig = {}) {
   }
   const auth = new AuthHub({
     ...config.auth,
-    // 未显式配置回调地址时，按 publicUrl / 本机端口兜底拼一个，
-    // 并在日志里喊出来——回调地址与白名单不一致是"登录起不来"的头号原因
+    // redirectUri 在 loadConfig 里已按端口给出回环默认值（形状受白名单约束，见那里）。
+    // 这里只兜"调用方直接构造 config 且没给"的情况——测试与嵌入式启动走的就是这条。
     redirectUri: config.auth.redirectUri
-      ?? `${config.publicUrl || `http://${os.hostname()}:${config.port}`}/auth/oidc/callback`,
+      || `http://127.0.0.1:${config.port}/callback`,
     logger,
   });
   if (config.auth.enabled) {
