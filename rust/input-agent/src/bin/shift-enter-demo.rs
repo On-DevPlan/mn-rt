@@ -34,11 +34,17 @@ fn main() {
     let mut enigo = Enigo::new(&Settings::default()).expect("enigo init failed");
 
     for i in 1..=TOTAL {
-        enigo.key(Key::Shift, Direction::Press).expect("press shift failed");
+        enigo
+            .key(Key::Shift, Direction::Press)
+            .expect("press shift failed");
         thread::sleep(Duration::from_millis(HOTKEY_DELAY_MS));
-        enigo.key(Key::Return, Direction::Click).expect("click return failed");
+        enigo
+            .key(Key::Return, Direction::Click)
+            .expect("click return failed");
         thread::sleep(Duration::from_millis(HOTKEY_DELAY_MS));
-        enigo.key(Key::Shift, Direction::Release).expect("release shift failed");
+        enigo
+            .key(Key::Shift, Direction::Release)
+            .expect("release shift failed");
         println!("[{i}/{TOTAL}] Shift+Enter 已发送");
 
         if i < TOTAL {

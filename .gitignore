@@ -25,3 +25,4 @@ Thumbs.db
 
 # 测试临时文件
 /tmp/rt-e2e-*
+.gstack/
