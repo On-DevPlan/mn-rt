@@ -1,0 +1,112 @@
+name: Diagnose network
+
+# 只读诊断：不进容器改任何东西、不重启、不改防火墙规则。
+#
+# 为什么要单独一个 workflow 而不是塞进 Deploy：这条通道现在是唯一能进那台机器的路
+# （人肉 key 被拒、CI key 可用），所以它必须"看一眼不会坏一件事"。
+# 任何会改状态的命令都不该放进来——尤其 iptables/安全组类，
+# 打错一次就会把 CI 自己的 SSH 也锁在外面，那就彻底没人进得去了。
+#
+# 回答的是一句话都别猜的问题：容器连不上认证中心，是宿主机出不去、
+# 还是只有容器出不去。这两种的修法完全不同，而在机器外面看永远看不出来。
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: diagnose-network
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: 出站链路探测（只读）
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe egress from host and container
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          IDP: ${{ vars.RT_DIAG_IDP || 'http://47.110.80.47:8082' }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.PORT || 22 }}
+          envs: IDP
+          timeout: 30s
+          command_timeout: 4m
+          script: |
+            # 刻意不 set -e：诊断的目标是把每一层的观测都拿回来，
+            # 某条命令失败本身就是结果，不该因此丢掉后面所有输出。
+            DISC="$IDP/.well-known/openid-configuration"
+
+            echo "############ 0. 机器与容器现状"
+            hostnamectl --static hostname 2>/dev/null || hostname
+            uptime
+            free -m | head -3
+            echo "-- 内存：这台常年紧张，OOM 会让 sshd/容器出现各种假故障"
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | head -10
+            docker inspect -f 'restart={{.RestartCount}} oomkilled={{.State.OOMKilled}} started={{.State.StartedAt}}' remotetype_server 2>/dev/null \
+              || echo "!! 容器 remotetype_server 不存在"
+
+            echo
+            echo "############ 1. 宿主机能不能出站（关键分叉点）"
+            echo "-- DNS 解析"
+            getent hosts 47.110.80.47 || echo "(反向解析无记录，正常)"
+            command -v dig >/dev/null && dig +short 47.110.80.47.in-addr.arpa 2>/dev/null | head -2
+            echo "-- TCP 层能不能建上 8082"
+            timeout 8 bash -c 'exec 3<>/dev/tcp/47.110.80.47/8082' \
+              && echo "host tcp 8082 = OPEN" || echo "host tcp 8082 = FAIL（连接层就不通）"
+            echo "-- HTTP 拉发现文档"
+            curl -m 12 -sS -o /tmp/diag_disc.json -w "host http = %{http_code} (%{time_total}s)\n" "$DISC" \
+              || echo "host http = FAIL"
+            head -c 160 /tmp/diag_disc.json 2>/dev/null; echo
+
+            echo
+            echo "############ 2. 容器能不能出站（和第 1 步对比才有效）"
+            echo "-- 容器里用的 DNS 服务器"
+            docker exec remotetype_server cat /etc/resolv.conf 2>/dev/null | head -5
+            echo "-- 容器 HTTP 拉发现文档（用 node 内置 fetch，镜像里一定有 node，不赌 curl 存在）"
+            docker exec remotetype_server node -e '
+              const u = process.argv[1];
+              const t = setTimeout(() => { console.log("container http = FAIL timeout"); process.exit(0); }, 15000);
+              fetch(u).then(async (r) => {
+                clearTimeout(t);
+                const b = await r.text();
+                console.log("container http = " + r.status + " bytes=" + b.length);
+              }).catch((e) => {
+                clearTimeout(t);
+                console.log("container http = FAIL " + (e && e.cause ? (e.cause.code || e.cause.message || e.cause) : e.message));
+              });
+            ' "$DISC" 2>&1 | tail -3
+
+            echo
+            echo "############ 3. 容器到宿主机默认网关（判断是不是整体没有转发）"
+            GW=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' remotetype_server 2>/dev/null)
+            echo "gateway=$GW"
+            [ -n "$GW" ] && timeout 5 ping -c 2 -W 2 "$GW" >/dev/null 2>&1 \
+              && echo "container ping gateway = OK" || echo "container ping gateway = FAIL"
+
+            echo
+            echo "############ 4. ip 转发与 FORWARD 链（只读；只打印，绝不修改）"
+            echo "-- net.ipv4.ip_forward 必须是 1，否则容器出不了网"
+            sysctl -n net.ipv4.ip_forward 2>/dev/null
+            echo "-- docker 自己的转发策略"
+            docker info --format 'ipForward={{.IPv4Forwarding}} iptables={{.Iptables}} bridgeNf={{.BridgeNfIptables}}' 2>/dev/null
+            echo "-- FORWARD 链里 docker 相关条目的计数与策略（只看，不改）"
+            iptables -L FORWARD -n 2>/dev/null | head -4
+            echo "-- 有没有 ACCEPT 给到目标地址"
+            iptables -S FORWARD 2>/dev/null | grep -c "ACCEPT" | sed 's/^/FORWARD ACCEPT rules: /'
+            iptables -S FORWARD 2>/dev/null | grep -iE "DROP|REJECT" | head -6
+
+            echo
+            echo "############ 5. 认证中心反过来能不能碰到这台（只测已开放的 8790）"
+            curl -m 10 -sS -o /dev/null -w "self 8790/health = %{http_code}\n" http://127.0.0.1:8790/health || echo "self 8790 FAIL"
+            curl -m 10 -sS http://127.0.0.1:8790/auth/oidc/config 2>/dev/null | head -c 400; echo
+
+            echo
+            echo "############ 结论怎么读"
+            echo "1 通 2 不通 → 容器网络问题（ip_forward / FORWARD 链 / docker bridge 配置）"
+            echo "1 不通        → 主机层问题（云安全组出方向 / 上游路由 / 目标侧限制），与 docker 无关"
+            echo "1 通 2 通 但服务端仍报 idpAvailable=false → 服务端自己的问题，去看它报的 idpError"
+            echo "（本 workflow 不修改任何状态；要改请单独确认后再做）"
