@@ -2,7 +2,7 @@
 
 [![build-input-agent](https://github.com/ZHLX2005/mn-rt/actions/workflows/build-input-agent.yml/badge.svg)](https://github.com/ZHLX2005/mn-rt/actions/workflows/build-input-agent.yml)
 [![node-ci](https://github.com/ZHLX2005/mn-rt/actions/workflows/node-ci.yml/badge.svg)](https://github.com/ZHLX2005/mn-rt/actions/workflows/node-ci.yml)
-[![npm version](https://img.shields.io/npm/v/@ondevplann/remotetype)](https://www.npmjs.com/package/@ondevplann/remotetype)
+[![npm version](https://img.shields.io/npm/v/nx-rt)](https://www.npmjs.com/package/nx-rt)
 
 把手机上的语音识别结果，实时注入到电脑当前焦点输入框。
 
@@ -10,7 +10,7 @@
 手机 (ASR 文本)
    │  WebSocket
    ▼
-公网 Serve 服务端  ──按 clientId 路由──►  PC 客户端 (npx @ondevplann/remotetype serve)
+公网 Serve 服务端  ──按 clientId 路由──►  PC 客户端 (npx nx-rt serve)
                                               │  Node 业务层
                                               │  stdio IPC（单行 JSON）
                                               ▼
@@ -37,8 +37,8 @@ PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经�
 
 ```bash
 # 电脑：启动（不传 --key 则自动生成强随机 key 并打印）
-npx @ondevplann/remotetype serve
-npx @ondevplann/remotetype serve --key MYKEY123     # 两端用同一个 key
+npx nx-rt serve
+npx nx-rt serve --key MYKEY123     # 两端用同一个 key
 
 # 手机方式一（免装 app）：浏览器直接打开 http://<server>:8790/
 #   网页控制台已内置 RT1 实时同步——输入/删除实时对齐，无发送按钮；
@@ -46,7 +46,7 @@ npx @ondevplann/remotetype serve --key MYKEY123     # 两端用同一个 key
 # 手机方式二：fr app → Lab → 远程输入（联机）→ 填服务器地址 + key → 连接电脑
 # 服务器：node server/src/server.js，建议同时设置 RT_TOKEN 注册门禁
 #   设了 RT_TOKEN 后，PC 端须携带同一 token（--token 或环境变量 REMOTETYPE_TOKEN / RT_TOKEN）：
-npx @ondevplann/remotetype serve --token SECRET
+npx nx-rt serve --token SECRET
 ```
 
 ### 协议要点（RT1 直连版）
@@ -134,13 +134,13 @@ npm start
 ### 2. 启动 PC 客户端
 
 ```bash
-npx @ondevplann/remotetype serve --url ws://your-server.example.com:8790/ws
+npx nx-rt serve --url ws://your-server.example.com:8790/ws
 ```
 
 serve 默认**对齐模式**：自动生成配对 key 并打印，手机端（网页控制台 / fr app）填同一 key 即可实时对齐。也可以全局安装后使用短命令：
 
 ```bash
-npm install -g @ondevplann/remotetype
+npm install -g nx-rt
 remotetype serve --url ws://your-server.example.com:8790/ws
 ```
 
@@ -149,19 +149,19 @@ remotetype serve --url ws://your-server.example.com:8790/ws
 常用参数：
 
 ```bash
-npx @ondevplann/remotetype serve --url <ws-url> --client-id <id> --log-level debug
-npx @ondevplann/remotetype serve --key MYKEY123       # 两端用同一个 key
-npx @ondevplann/remotetype serve --plain              # 旧普通模式（见下）
-npx @ondevplann/remotetype test "这是一段测试文本"     # 本地注入测试，不经过公网
-npx @ondevplann/remotetype doctor                     # 环境自检（平台/权限/二进制）
-npx @ondevplann/remotetype binary                     # 查看注入引擎二进制路径
+npx nx-rt serve --url <ws-url> --client-id <id> --log-level debug
+npx nx-rt serve --key MYKEY123       # 两端用同一个 key
+npx nx-rt serve --plain              # 旧普通模式（见下）
+npx nx-rt test "这是一段测试文本"     # 本地注入测试，不经过公网
+npx nx-rt doctor                     # 环境自检（平台/权限/二进制）
+npx nx-rt binary                     # 查看注入引擎二进制路径
 ```
 
 **旧普通模式（`--plain`）**：v0.2.0 前的 serve 行为——接收 `/push` 接口与外部脚本推来的整句明文，
 打完即注入，无对齐、无加密。仅建议 curl / 自动化脚本场景使用：
 
 ```bash
-npx @ondevplann/remotetype serve --plain --url ws://your-server.example.com:8790/ws
+npx nx-rt serve --plain --url ws://your-server.example.com:8790/ws
 curl -X POST http://127.0.0.1:8899/push -H 'Content-Type: application/json' \
   -d '{"clientId":"pc-abc123","text":"明天上午十点开会"}'
 ```
@@ -381,7 +381,7 @@ bash test/e2e.sh 2 6      # 只跑用例 2 和 6
 | `client` | 3 平台 × Node 20/22，语法检查 + CLI 冒烟 + 25 项单元测试 |
 | `rust unit` | `cargo test` / `cargo fmt --check` / `cargo clippy -D warnings` |
 
-**`fuck-npm.yml`** — push 到 main 自动发布 npm 包 `@ondevplann/remotetype`（见下节）。
+**`fuck-npm.yml`** — push 到 main 自动发布 npm 包 `nx-rt`（见下节）。
 
 ### 发布
 

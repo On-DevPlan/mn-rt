@@ -1,6 +1,6 @@
 # npm 自动发布：push 到 main → 自动打 tag + npm publish（带 provenance 签名）。
 #
-# 发布对象：client/ 下的主包 @ondevplann/remotetype。
+# 发布对象：client/ 下的主包 nx-rt（原 @ondevplann/remotetype，2026-10-11 改名）。
 # 平台分包 @ondevplann/input-agent-* 不在本工作流范围（rust 二进制变更时手动发布，
 # 且须同步出 GitHub Release tag —— npm 包版本与 release tag 保持一致，见 mn-rt 版本纪律）。
 #
