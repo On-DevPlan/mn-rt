@@ -106,12 +106,24 @@ jobs:
           SSH_KEY_LEN:  ${{ secrets.SSH_KEY }}
           PORT_LEN:     ${{ secrets.PORT }}
           GHCR_TOKEN_LEN: ${{ secrets.GHCR_TOKEN }}
+          RT_AUTH_ENABLED_VAL: ${{ secrets.RT_AUTH_ENABLED }}
+          RT_AUTH_JWT_SECRET_LEN: ${{ secrets.RT_AUTH_JWT_SECRET }}
         run: |
           echo "HOST length: ${#HOST_LEN}"
           echo "USERNAME length: ${#USERNAME_LEN}"
           echo "SSH_KEY length: ${#SSH_KEY_LEN}"
           echo "PORT length: ${#PORT_LEN}"
           echo "GHCR_TOKEN length: ${#GHCR_TOKEN_LEN} (0=未配，服务器将走匿名 pull，可能 401)"
+          # 统一登录的两项单独打：enabled 决定后面所有属主判据是否存在；
+          # JWT_SECRET 在开启时缺失会让容器**拒绝启动**（不是降级运行），
+          # 这里先说清楚，免得只看到一串 restart 日志找不到原因。
+          echo "RT_AUTH_ENABLED: '${RT_AUTH_ENABLED_VAL:-<未配, 关闭>}' (认 1/true/yes/on)"
+          echo "RT_AUTH_JWT_SECRET length: ${#RT_AUTH_JWT_SECRET_LEN} (开启时 0 = 容器拒绝启动)"
+          if [ -n "${RT_AUTH_ENABLED_VAL:-}" ] && [ -z "${RT_AUTH_JWT_SECRET_LEN:-}" ]; then
+            case "$(printf '%s' "$RT_AUTH_ENABLED_VAL" | tr 'A-Z' 'a-z')" in
+              1|true|yes|on) echo "::error::RT_AUTH_ENABLED 已开启但 RT_AUTH_JWT_SECRET 未配，部署必然失败"; exit 1;;
+            esac
+          fi
 
       # 把 GHCR pull 用的鉴权文件以 artifact 形式从 build 传到 deploy（ref1 坑 1：
       # job output 会被 secret-scanner 拦，artifact 文件不被扫值。
@@ -155,12 +167,16 @@ jobs:
         env:
           RT_TOKEN: ${{ secrets.RT_TOKEN }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || '' }}
+          RT_AUTH_ENABLED: ${{ secrets.RT_AUTH_ENABLED || '' }}
+          RT_AUTH_JWT_SECRET: ${{ secrets.RT_AUTH_JWT_SECRET || '' }}
+          RT_AUTH_ISSUER: ${{ secrets.RT_AUTH_ISSUER || '' }}
+          RT_AUTH_CLIENT_ID: ${{ secrets.RT_AUTH_CLIENT_ID || '' }}
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.PORT || 22 }}
-          envs: RT_TOKEN,GHCR_TOKEN
+          envs: RT_TOKEN,GHCR_TOKEN,RT_AUTH_ENABLED,RT_AUTH_JWT_SECRET,RT_AUTH_ISSUER,RT_AUTH_CLIENT_ID
           timeout: 30s
           command_timeout: 30m
           script: |
@@ -201,7 +217,26 @@ jobs:
               -v mn_rt_data:/app/data \
               -v mn_rt_logs:/app/logs \
               ${RT_TOKEN:+-e RT_TOKEN="$RT_TOKEN"} \
+              ${RT_AUTH_ENABLED:+-e RT_AUTH_ENABLED="$RT_AUTH_ENABLED"} \
+              ${RT_AUTH_JWT_SECRET:+-e RT_AUTH_JWT_SECRET="$RT_AUTH_JWT_SECRET"} \
+              ${RT_AUTH_ISSUER:+-e RT_AUTH_ISSUER="$RT_AUTH_ISSUER"} \
+              ${RT_AUTH_CLIENT_ID:+-e RT_AUTH_CLIENT_ID="$RT_AUTH_CLIENT_ID"} \
               "${IMAGE}"
+
+            # ── 部署后必须验一次"配了的确实生效了" ────────────────────────────
+            # 不是多余的保险：RT_AUTH_ENABLED 曾经只认字面 'true'，
+            # compose/secrets 里写 1 会被判成关闭，而服务照常起、/health 照样绿。
+            # 那等于整套属主隔离静默不存在，CI 全绿、人以为开着。
+            # 所以判据必须打在"运行中的进程怎么说"上，而不是"我传了什么"上。
+            AUTH_WANT="${RT_AUTH_ENABLED:-}"
+            case "$(printf '%s' "$AUTH_WANT" | tr 'A-Z' 'a-z')" in
+              1|true|yes|on) AUTH_WANT=true ;;
+              0|false|no|off|"") AUTH_WANT=false ;;
+              *) echo "RT_AUTH_ENABLED 取值无法识别: $AUTH_WANT"; exit 1 ;;
+            esac
+            AUTH_SECRET_SET=false
+            [ -n "$RT_AUTH_JWT_SECRET" ] && AUTH_SECRET_SET=true
+            echo "verify auth: want=$AUTH_WANT secret_set=$AUTH_SECRET_SET"
 
             MAX=6; i=0; ok=false
             while [ $i -lt $MAX ]; do
@@ -217,6 +252,28 @@ jobs:
               echo "Health FAILED. Recent logs:"
               docker logs "${CONTAINER_NAME}" --tail 60
               exit 1
+            fi
+
+            # ── 运行态断言：进程自己报的 enabled 必须与本次意图一致 ──
+            CFG=$(curl -s -m 10 "http://localhost:${HOST_PORT}/auth/oidc/config")
+            echo "GET /auth/oidc/config -> $CFG"
+            AUTH_IS=$(printf '%s' "$CFG" | sed -n 's/.*"enabled":\([a-z]*\).*/\1/p')
+            if [ "$AUTH_IS" != "$AUTH_WANT" ]; then
+              echo "统一登录状态与部署意图不符：期望 enabled=$AUTH_WANT，实际 '${AUTH_IS:-无}'"
+              echo "（这正是「配了 1 却被当成关闭」那类静默失效的形态，不要放行）"
+              docker logs "${CONTAINER_NAME}" --tail 40
+              exit 1
+            fi
+            if [ "$AUTH_WANT" = "true" ]; then
+              # 认证中心可达性必须在**服务端侧**验，不是本机：浏览器能打开认证中心
+              # 不代表容器出得去。idpAvailable 只有真的拉到发现文档才会是 true。
+              if ! printf '%s' "$CFG" | grep -q '"idpAvailable":true'; then
+                echo "统一登录已开启但拉不到认证中心发现文档（容器到 issuer 的网络不通）"
+                echo "  issuer=$(printf '%s' "$CFG" | sed -n 's/.*"issuer":"\([^"]*\)".*/\1/p')"
+                docker logs "${CONTAINER_NAME}" --tail 40
+                exit 1
+              fi
+              echo "auth ok: enabled + idpAvailable"
             fi
 
             docker image prune -f > /dev/null || true

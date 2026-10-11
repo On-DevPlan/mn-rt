@@ -8,6 +8,8 @@
  *   remotetype serve                  启动守护进程（默认对齐模式：端到端加密 + 输入框实时对齐）
  *   remotetype serve --plain          兼容旧普通模式：只接收整句明文推送（无对齐）
  *   remotetype test "文本"             本地直接测试 Rust 注入，不走公网服务
+ *   remotetype auth login             统一登录（go-ah auth-hub）：免掉人工复制配对 key
+ *   remotetype auth status|logout     查看/清除本机登录凭据
  *   remotetype doctor                 环境自检（平台/二进制/权限/网络）
  *   remotetype binary                 打印解析到的 Rust 二进制路径
  *
@@ -31,7 +33,8 @@ const { LocalStore } = require('../lib/store');
 const { Logger } = require('../lib/logger');
 const { sanitize } = require('../lib/sanitize');
 const { findBinary, isSupported, resolveTarget, binaryUrl, cacheDir } = require('../lib/platform');
-const { loadConfig, parseArgs, resolveEnterMode, saveConnectionConfig, DEFAULT_SERVE_URL } = require('../lib/config');
+const { loadConfig, parseArgs, resolveEnterMode, saveConnectionConfig, clearAuthCredentials, readConfigFile, DEFAULT_SERVE_URL } = require('../lib/config');
+const { authLogin, getJson } = require('../lib/auth');
 
 const pkg = require('../package.json');
 
@@ -62,13 +65,19 @@ ${C.bold}命令${C.reset}
   ${C.cyan}serve${C.reset}               启动守护进程：对齐模式（端到端加密，手机输入框与电脑实时对齐，含删除）
   ${C.cyan}serve --plain${C.reset}       兼容旧普通模式：只接收整句明文推送（/push 接口、外部脚本）
   ${C.cyan}test${C.reset} "<文本>"        本地测试：直接调用注入引擎，不连公网
+  ${C.cyan}auth login${C.reset}          统一登录（弹浏览器）：换回设备令牌 + 会话密钥，之后免配 key
+  ${C.cyan}auth status${C.reset}         查看当前身份、令牌剩余有效期、本机是否已登记
+  ${C.cyan}auth logout${C.reset}         清除本机登录凭据
   ${C.cyan}doctor${C.reset}              环境自检：平台支持 / 注入二进制 / 权限 / 网络
   ${C.cyan}binary${C.reset}              打印解析到的注入引擎路径
 
 ${C.bold}选项${C.reset}
   --url <ws://...>       公网服务地址（默认 ${require('../lib/config').DEFAULT_SERVE_URL}）
   --client-id <id>       本机唯一标识，服务端按此路由（默认自动生成并持久化）
-  --key <KEY>            对齐模式配对 key（不传则自动生成强随机并打印；手机端输入同一 key）
+  --key <KEY>            手动指定配对/会话 key（统一登录下由服务端自动下发，一般不需要）
+  --server-http <url>    统一登录用的 HTTP 基址（默认从 --url 推导：ws://h:p/ws → http://h:p）
+  --device-name <名>     手机端「我的电脑」列表里显示的名字（默认取主机名）
+  --no-open              auth login 只打印授权地址、不弹浏览器（SSH / 无桌面环境用）
   --plain                切回旧普通模式：接收整句明文推送（无对齐、无加密）
   --align                （已默认开启，保留兼容；与 --plain 同给时 --plain 优先）
   --token <TOKEN>        注册门禁 token（服务器设 RT_TOKEN 后两端都必须携带同一值）
@@ -83,9 +92,10 @@ ${C.bold}选项${C.reset}
   --version              显示版本
 
 ${C.bold}示例${C.reset}
-  npx remotetype serve --url ws://1.2.3.4:8790/ws   # 对齐模式，自动生成 key，复制到手机
-  npx remotetype serve --key MYKEY123               # 两端用同一个 key
-  npx remotetype serve --plain                      # 旧普通模式（接收 /push 整句推送）
+  npx remotetype auth login --url ws://1.94.101.189:8790/ws   # 统一登录，之后免配 key
+  npx remotetype                                            # 登录过一次后裸命令直连
+  npx remotetype serve --url ws://1.2.3.4:8790/ws --key MYKEY123   # 旧手动配对模式
+  npx remotetype serve --plain                              # 旧普通模式（接收 /push 整句推送）
   npx remotetype test "你好，这是一条本地注入测试"
   npx remotetype doctor
 `);
@@ -189,6 +199,142 @@ function printPlatformNotes(logger) {
   }
 }
 
+// ============================ auth ============================
+
+/**
+ * auth 子命令组：统一登录（认证中心 = go-ah auth-hub）。
+ *
+ *   auth login    打开浏览器完成一次授权 → 换回本服务的设备令牌 + 会话密钥并落盘
+ *   auth status   看当前身份、令牌还剩多久、这台机器在不在服务端登记表里
+ *   auth logout   抹掉本机存的凭据（服务端的设备记录保留，可被属主重新绑定）
+ *
+ * 与旧 `--key` 的关系：两者并存且互不覆盖。`--key` 显式传入时优先，
+ * 让人能临时连一台没开统一登录的老服务器，而不必先清配置。
+ */
+async function cmdAuth(cfg, sub) {
+  const action = sub || 'status';
+
+  if (action === 'login') {
+    if (!cfg.serverHttp) {
+      say(`${C.red}缺少服务端地址${C.reset}：先用 --url ws://<host>:<port>/ws 连一次，或设 REMOTETYPE_SERVER_HTTP`);
+      process.exitCode = 1;
+      return;
+    }
+    say(`${C.dim}服务端：${cfg.serverHttp}${C.reset}`);
+    say(`${C.dim}本机标识：${cfg.clientId}    设备名：${cfg.deviceName}${C.reset}`);
+
+    let res;
+    try {
+      res = await authLogin({
+        serverHttp: cfg.serverHttp,
+        clientId: cfg.clientId,
+        deviceName: cfg.deviceName,
+        noOpen: cfg.noOpen === true,
+        onUrl: (url) => {
+          say('');
+          say(`${C.yellow}请在弹出的浏览器里完成统一登录${C.reset}（未自动弹出就手动打开下面地址）`);
+          say(`${C.dim}${url}${C.reset}`);
+          say('');
+          say(`${C.dim}等待授权回调…（5 分钟超时）${C.reset}`);
+        },
+      });
+    } catch (e) {
+      say(`${C.red}✗ 登录失败${C.reset}：${e.message}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const saved = saveConnectionConfig({
+      url: cfg.url,
+      deviceToken: res.token,
+      sessionKey: res.sessionKey,
+      serverHttp: res.serverHttp,
+      deviceName: cfg.deviceName,
+      authUser: {
+        userId: res.userId, email: res.email, username: res.username,
+        nickname: res.nickname, loginAt: Date.now(), expiresAt: res.tokenExpiresAt,
+      },
+    });
+    say(`${C.green}✓ 登录成功${C.reset}：${res.nickname || res.username || res.email || res.userId}`);
+    if (res.sessionKey) {
+      say(`${C.dim}会话密钥已由服务端下发（${String(res.sessionKey).slice(0, 8)}…），手机登录后会自动拿到同一把，无需再手填配对 key${C.reset}`);
+    } else {
+      say(`${C.yellow}! 服务端没有下发会话密钥${C.reset}：手机端仍需手填配对 key。确认服务端版本已支持统一登录`);
+    }
+    if (res.tokenExpiresAt) {
+      const days = Math.round((res.tokenExpiresAt - Date.now()) / 86400000);
+      say(`${C.dim}设备令牌有效期约 ${days} 天，过期后重新执行 npx nx-rt auth login${C.reset}`);
+    }
+    say(`${C.dim}已保存 → ${saved.file}${C.reset}`);
+    say(`${C.green}现在直接 npx nx-rt 即可启动，手机端的「远程输入」里能看到这台电脑${C.reset}`);
+    return;
+  }
+
+  if (action === 'logout') {
+    const r = clearAuthCredentials();
+    say(r.changed
+      ? `${C.green}✓ 已清除本机统一登录凭据${C.reset}（${r.file}）`
+      : `${C.dim}本机本来就没有登录凭据${C.reset}`);
+    return;
+  }
+
+  if (action !== 'status') {
+    say(`${C.red}未知子命令：auth ${action}${C.reset}`);
+    say(`可用：login | status | logout`);
+    process.exitCode = 1;
+    return;
+  }
+
+  // status —— 只读本地存的东西，不联网；联网部分失败也不影响本地结论
+  const file = readConfigFile();
+  const u = file.authUser || null;
+  if (!file.deviceToken) {
+    say(`${C.yellow}未登录${C.reset}（${file.alignKey ? '当前使用旧的手动配对 key 模式' : '也没有配对 key'}）`);
+    say(`${C.dim}执行 npx nx-rt auth login 接入统一登录平台${C.reset}`);
+    return;
+  }
+  say(`${C.bold}统一登录状态${C.reset}`);
+  say(`  身份    ${u ? (u.nickname || u.username || u.email || u.userId) : '(本地令牌无身份快照)'}`);
+  if (u && u.email) say(`  邮箱    ${u.email}`);
+  say(`  服务端  ${file.serverHttp || cfg.serverHttp || '(未知)'}`);
+  say(`  设备名  ${file.deviceName || cfg.deviceName}`);
+  say(`  密钥    ${file.sessionKey ? `有（${String(file.sessionKey).slice(0, 8)}…）` : '无（手机端需手填配对 key）'}`);
+  if (file.tokenExpiresAt || (u && u.expiresAt)) {
+    const exp = (u && u.expiresAt) || file.tokenExpiresAt;
+    const left = exp - Date.now();
+    if (left <= 0) say(`  ${C.red}令牌已过期${C.reset}，请重新 npx nx-rt auth login`);
+    else say(`  剩余    ${Math.floor(left / 86400000)} 天 ${Math.floor((left % 86400000) / 3600000)} 小时`);
+  }
+
+  // 向服务端验一次令牌：本地有 token 不代表服务端还认（可能已被吊销或换过 JWT_SECRET）。
+  // 用 /my/devices 而不是单开的探测口——它既验令牌又顺带回答"这台机器登记上了吗"。
+  const base = (file.serverHttp || cfg.serverHttp || '').replace(/\/+$/, '');
+  if (base) {
+    try {
+      const r = await getJson(`${base}/my/devices`, { Authorization: `Bearer ${file.deviceToken}` });
+      if (r.json && r.json.ok) {
+        say(`  ${C.green}服务端认可此令牌${C.reset}（属主 ${r.json.userId || (r.json.devices[0] || {}).owner || ''}，名下 ${r.json.count ?? (r.json.devices || []).length} 台设备）`);
+        const here = (r.json.devices || []).find((d) => d.clientId === (cfg.clientId));
+        say(here
+          ? `  ${C.green}✓${C.reset} 本机已在服务端登记：${here.deviceName || here.clientId}${here.online ? '（在线）' : ''}`
+          : `  ${C.yellow}!${C.reset} 本机尚未登记（还没跑过 serve？）：clientId ${cfg.clientId}`);
+      } else if (r.status === 401) {
+        say(`  ${C.red}服务端不认此令牌${C.reset} → 重新 npx nx-rt auth login`);
+        process.exitCode = 1;
+      } else {
+        say(`  ${C.yellow}! 服务端返回异常${C.reset}：HTTP ${r.status} ${JSON.stringify(r.json).slice(0, 120)}`);
+      }
+    } catch (e) {
+      say(`  ${C.yellow}! 无法连到服务端校验${C.reset}：${e.message}（本地凭据仍保留）`);
+    }
+  }
+}
+
+/** --no-open 的布尔判定（parseArgs 把 --no-open 映射成 noOpen: true）。 */
+function flagsTruthy(cfg) {
+  return cfg.noOpen === true;
+}
+
 // ============================ serve ============================
 
 /**
@@ -215,9 +361,10 @@ async function cmdServe(cfg) {
     maxTextLength: cfg.maxTextLength,
   });
 
-  // 首次使用提示：还没有任何已保存的连接参数时，指引用户带参数跑一次
-  if (cfg.url === DEFAULT_SERVE_URL && !cfg.alignKey) {
-    say(`${C.dim}首次使用：npx nx-rt serve --url ws://<服务器>:8790/ws --key <配对key>${C.reset}`);
+  // 首次使用提示：既没登录过、也没有配对 key，才给这条老路径的指引
+  if (cfg.url === DEFAULT_SERVE_URL && !cfg.sessionKey && !cfg.deviceToken) {
+    say(`${C.dim}首次使用（推荐统一登录）：npx nx-rt auth login --url ws://<服务器>:8790/ws${C.reset}`);
+    say(`${C.dim}或沿用旧手动配对：      npx nx-rt serve --url ws://<服务器>:8790/ws --key <配对key>${C.reset}`);
     say(`${C.dim}连接成功后参数自动保存，之后裸命令 npx nx-rt 直接连${C.reset}`);
   }
 
@@ -391,14 +538,18 @@ async function cmdServe(cfg) {
 
   // ---- 对齐模式（可选）：密文信封 → 按键计划 → ACK ----
   if (cfg.align) {
-    const key = cfg.alignKey || rtCrypto.generateKey();
+    // 密钥来源优先级：显式 --key / 统一登录存下的 sessionKey > 老的 alignKey > 临时自生成。
+    // 走统一登录时这把 key 由服务端按属主下发，手机端登录同一账号会自动拿到同一把，
+    // 两端不再有任何人工复制。
+    const key = cfg.sessionKey || cfg.alignKey || rtCrypto.generateKey();
+    const keyIsGenerated = !(cfg.sessionKey || cfg.alignKey);
     align = new RtAlignSession({
       key,
       logger,
       sendAck: (envelope) => serve.send({ type: 'ack', phoneId: align.phoneId, ack: envelope }),
     });
 
-    if (!cfg.alignKey) {
+    if (keyIsGenerated) {
       say('');
       say(`${C.bold}${C.green}  ┌──────────────────────────────────────────┐${C.reset}`);
       say(`${C.bold}${C.green}  │  配对 key（输入到 fr「远程输入」demo）：  │${C.reset}`);
@@ -406,7 +557,10 @@ async function cmdServe(cfg) {
       say(`${C.bold}${C.green}  │            ${key}            │${C.reset}`);
       say(`${C.bold}${C.green}  └──────────────────────────────────────────┘${C.reset}`);
       say(`${C.dim}  key 即凭据：泄漏 = 任何人可向本机注入文本。勿外传。${C.reset}`);
+      say(`${C.dim}  想免掉这一步：npx nx-rt auth login 接入统一登录平台${C.reset}`);
       say('');
+    } else if (cfg.deviceToken) {
+      logger.info('对齐密钥来自统一登录（服务端下发），手机端登录同一账号即可直连');
     }
 
     align.on('decrypt-error', ({ seq }) => {
@@ -426,6 +580,9 @@ async function cmdServe(cfg) {
     url: cfg.url,
     clientId: cfg.clientId,
     token: cfg.token,
+    deviceToken: cfg.deviceToken,
+    deviceName: cfg.deviceName,
+    sessionKey: cfg.sessionKey,
     logger,
   });
 
@@ -444,15 +601,32 @@ async function cmdServe(cfg) {
     logger.warn('与服务端连接已断开', { code, reason });
   });
   serve.on('registered', (msg) => {
-    logger.info('服务端已登记本机', { clientId: msg.clientId, role: msg.role });
+    logger.info('服务端已登记本机', {
+      clientId: msg.clientId, role: msg.role, owner: msg.device && msg.device.owner,
+    });
     // 连通即保存：本次成功连接的 url/key/token 成为下次默认（--no-save 跳过）
     if (!cfg.noSave) {
-      const saved = saveConnectionConfig(cfg);
+      const saved = saveConnectionConfig({
+        url: cfg.url,
+        alignKey: cfg.alignKey,
+        token: cfg.token,
+        deviceToken: cfg.deviceToken,
+        sessionKey: serve.sessionKey || cfg.sessionKey,
+        deviceName: cfg.deviceName,
+        serverHttp: cfg.serverHttp,
+      });
       if (saved.changed) {
         say(`${C.dim}已保存连接配置 → ${saved.file}${C.reset}`);
         say(`${C.dim}下次直接 npx nx-rt 即可用同样参数连接${C.reset}`);
       }
     }
+  });
+
+  // 服务端下发的权威会话密钥：热切 align 会话，不让用户为重连一次而重启进程
+  serve.on('session-key', (key) => {
+    const swapped = align ? align.setKey(key) : false;
+    logger.info('采纳服务端下发的会话密钥', { appliedToAlign: swapped, preview: String(key).slice(0, 8) });
+    if (!cfg.noSave) saveConnectionConfig({ sessionKey: key });
   });
 
   serve.on('text', (msg) => {
@@ -485,9 +659,14 @@ async function cmdServe(cfg) {
     }
   });
 
-  // 注册门禁拒绝（4403）：token 配置错误需要人工介入，重连无意义，直接退出
-  serve.on('auth-rejected', () => {
-    logger.error('token 无效或缺失：请核对 --token / REMOTETYPE_TOKEN 与服务器 RT_TOKEN 是否一致');
+  // 注册门禁拒绝：4403 = 老的 RT_TOKEN 不匹配；4401 = 统一登录凭据缺失/过期。
+  // 两者都需要人工介入，重连无意义，直接退出。
+  serve.on('auth-rejected', ({ code }) => {
+    if (code === 4401) {
+      logger.error('服务端要求统一登录：执行 npx nx-rt auth login（令牌过期同理）');
+    } else {
+      logger.error('token 无效或缺失：请核对 --token / REMOTETYPE_TOKEN 与服务器 RT_TOKEN 是否一致');
+    }
     shutdown('auth-rejected', 1);
   });
 
@@ -753,6 +932,8 @@ async function main() {
       return cmdTest(cfg, rest);
     case 'doctor':
       return cmdDoctor(cfg);
+    case 'auth':
+      return cmdAuth(cfg, rest[0]);
     case 'binary':
       return cmdBinary(cfg);
     case 'help':

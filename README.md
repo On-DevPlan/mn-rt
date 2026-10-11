@@ -36,17 +36,19 @@ PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经�
 ### 用法
 
 ```bash
-# 电脑：启动（不传 --key 则自动生成强随机 key 并打印）
-npx nx-rt serve
-npx nx-rt serve --key MYKEY123     # 两端用同一个 key
+# ── 推荐：统一登录（免掉人工复制 key）──
+npx nx-rt auth login --url ws://<server>:8790/ws   # 弹浏览器登录一次
+npx nx-rt                                         # 之后裸命令直连，密钥由服务端下发
+npx nx-rt auth status                             # 我是谁 / 令牌还剩多久 / 本机登记上了吗
+
+# ── 旧路径：手动配对 key（服务器未开启统一登录时唯一可用）──
+npx nx-rt serve                                   # 不传 --key 则自动生成强随机 key 并打印
+npx nx-rt serve --key MYKEY123                    # 两端用同一个 key
 
 # 手机方式一（免装 app）：浏览器直接打开 http://<server>:8790/
-#   网页控制台已内置 RT1 实时同步——输入/删除实时对齐，无发送按钮；
-#   非加密上下文（http）里浏览器语音不可用，用输入法自带语音键即可
-# 手机方式二：fr app → Lab → 远程输入（联机）→ 填服务器地址 + key → 连接电脑
-# 服务器：node server/src/server.js，建议同时设置 RT_TOKEN 注册门禁
-#   设了 RT_TOKEN 后，PC 端须携带同一 token（--token 或环境变量 REMOTETYPE_TOKEN / RT_TOKEN）：
-npx nx-rt serve --token SECRET
+#   网页控制台已内置 RT1 实时同步——输入/删除实时对齐，无发送按钮
+# 手机方式二：fr app → Lab → 远程输入：统一登录后直接列出你名下的电脑，点一下即连
+# 服务器：node server/src/server.js（开启统一登录见 server/DEPLOY.md）
 ```
 
 ### 协议要点（RT1 直连版）
@@ -63,10 +65,27 @@ npx nx-rt serve --token SECRET
 ### 安全边界（务必阅读）
 
 - **key 即凭据**：拿到 key = 可向这台电脑注入任意文本 + 解密全部输入内容。勿外传、勿入库。
-- 中转链路为明文 WS（机密性由端侧加密承担）；元数据（clientId、时序、长度）不设防。
+- **开启统一登录后，"端到端"变成"认证后端到端"**：会话密钥由服务端按属主下发
+  （PC 从 `registered` 帧拿、手机从 `/my/devices` 拿），不再需要两端人工交换。
+  换来的直接后果是**服务端读得到明文**——它能把密钥同时发给你的手机和你的电脑。
+  这是有意的取舍：代价换来的是"登录即见自己的设备、点一下即连、换绑被拒、跨用户零可见"，
+  以及不再需要人手传一个高熵凭据（那条路真实泄露面更大）。
+  **不接受这个前提就请把 `RT_AUTH_ENABLED` 关掉**，回到手动配对 key 的严格端到端。
+- 隔离靠的是**属主判定**而不是密钥保密：`/my/devices` 按令牌 `sub` 过滤、
+  注入前比对目标设备属主、`clientId` 已被他人绑定时拒绝改绑、
+  设备令牌里的 `cid` 必须与上报的 `clientId` 逐字相等（空 `cid` 的用户令牌注册不成 pc）。
+  以上每一条都有 `test/auth-e2e.js` 的离线端到端用例守着。
+- 中转链路为明文 WS（**机密性由端侧加密承担，而端侧密钥在服务端手里**）——
+  所以开启统一登录后，链路上 sniff 到的 `sessionKey` 与内容一样不设防。
+  公网部署请前置 nginx + TLS（`wss://`），这一条在开启统一登录后**从建议变成前提**。
+  元数据（clientId、时序、长度）任何模式下都不设防。
 - 服务器可设 `RT_TOKEN`（或 `--token`）注册门禁：防陌生人注册灌包。PC 端以 `--token`
   （或 `REMOTETYPE_TOKEN` / `RT_TOKEN` 环境变量）携带同一值，不符会被 4403 拒绝并停止重连；
-  PC 端对齐模式本身也会丢弃一切非信封/解密失败的流量。
+  开启统一登录后不再需要它（身份由认证中心断言，两端不再交换任何秘密），两者可并存。
+- align 模式一律丢弃非信封与解密失败的流量（不崩溃、只计数），所以错 key 的表现是
+  "连得上但什么都不注入"，不是报错。
+- 设备令牌是本服务自签的 HS256（30 天、带 `jti` 可吊销），**不是**认证中心的 token；
+  认证中心的 `refresh_token` 一律不落到 CLI 磁盘上（见 `client/lib/auth.js` 顶部说明）。
 - 对齐语义限制：PC 侧用户手工移动光标/打字会破坏对齐（与同类工具一致的已知限制）；
   清空超长文本靠逐键退格，耗时与长度成正比。
 - v0.4.0 起焦点注入策略 = 总是跟随 PC 当前焦点（v0.3.0 的"焦点绑定 + 漂移暂停"
@@ -130,40 +149,65 @@ npm start
 | `RT_RECORD_FILE` | `./data/records.jsonl` | 转录记录文件 |
 | `RT_LOG_DIR` | `./logs` | 日志目录 |
 | `RT_LOG_LEVEL` | `info` | 日志级别 |
+| `RT_AUTH_ENABLED` | 关 | 开启统一登录（认 `1/true/yes/on`；认不出的值**启动即抛错**，不会静默按关闭处理） |
+| `RT_AUTH_JWT_SECRET` | （空） | 设备令牌签名密钥。开启时必配，否则拒绝启动——硬编码默认值等于任何人都能伪造属主 |
+| `RT_AUTH_ISSUER` | `http://47.110.80.47:8082` | 认证中心地址，须与 `IDP_ISSUER` 逐字一致且浏览器可达 |
+| `RT_AUTH_CLIENT_ID` | `mn-rt` | 本服务在认证中心注册的 public client（回调为 127.0.0.1 端口通配） |
+| `RT_AUTH_DEVICE_FILE` | `./data/devices.json` | 设备→属主→会话密钥注册表（删了等于所有设备重新绑定） |
 
 ### 2. 启动 PC 客户端
 
 ```bash
+# 推荐：统一登录一次，之后免配 key
+npx nx-rt auth login --url ws://your-server.example.com:8790/ws
+npx nx-rt
+```
+
+`auth login` 会打开浏览器走统一登录（认证中心 = go-ah auth-hub），回调打到**本机**
+127.0.0.1 的一次性监听，CLI 自己用 PKCE 换 token，全程零复制粘贴；换回的设备令牌与
+会话密钥存入 `~/.nx-rt/config.json`。手机端登录同一账号即可看到你名下的电脑并直连。
+
+无桌面环境（SSH 里跑）用 `--no-open`：只打印授权地址，本地浏览器打开后把回调端口
+`ssh -L` 转过去即可（认证中心对 127.0.0.1 是端口通配的，端口不必对齐）。
+
+```bash
+# 旧路径：服务器未开启统一登录时，仍用手动配对 key
 npx nx-rt serve --url ws://your-server.example.com:8790/ws
 ```
 
-serve 默认**对齐模式**：自动生成配对 key 并打印，手机端（网页控制台 / fr app）填同一 key 即可实时对齐。也可以全局安装后使用短命令：
+serve 默认**对齐模式**：不传 `--key` 则自动生成强随机 key 并打印，手机端填同一 key 即可实时对齐。也可以全局安装后使用短命令：
 
 ```bash
 npm install -g nx-rt
 remotetype serve --url ws://your-server.example.com:8790/ws
 ```
 
-**连接记忆（0.5.1 起）**：连接成功后本次的 `--url` / `--key` / `--token` 自动存入
-`~/.nx-rt/config.json`（`--no-save` 本次不落盘），之后**裸命令直连**：
+**连接记忆（0.5.1 起）**：连接成功后本次的 `--url` / `--key` / `--token`（以及统一登录的
+设备令牌与会话密钥）自动存入 `~/.nx-rt/config.json`（`--no-save` 本次不落盘），
+之后**裸命令直连**：
 
 ```bash
 npx nx-rt        # 等价 serve，用最后一次成功连接的参数
 ```
 
-key 会随配置一起保存——重启用同一 key，手机端无需重新配对。配置文件含 key，勿提交仓库或外传。
+key 会随配置一起保存——重启用同一 key，手机端无需重新配对。配置文件含凭据，勿提交仓库或外传。
+`npx nx-rt auth logout` 只清统一登录产物，不动旧的 `--key` / `--token` 配置。
 
 首次运行会自动生成并持久化 `clientId`（存于 `~/.nx-rt/client-id`），用于服务端按目标路由。
 
 常用参数：
 
 ```bash
+npx nx-rt auth login                   # 统一登录（弹浏览器）
+npx nx-rt auth status                  # 我是谁 / 令牌剩余有效期 / 本机是否已登记
+npx nx-rt auth logout                  # 清除本机登录凭据
 npx nx-rt serve --url <ws-url> --client-id <id> --log-level debug
-npx nx-rt serve --key MYKEY123       # 两端用同一个 key
-npx nx-rt serve --plain              # 旧普通模式（见下）
-npx nx-rt test "这是一段测试文本"     # 本地注入测试，不经过公网
-npx nx-rt doctor                     # 环境自检（平台/权限/二进制）
-npx nx-rt binary                     # 查看注入引擎二进制路径
+npx nx-rt serve --key MYKEY123         # 两端用同一个 key（旧手动配对）
+npx nx-rt serve --device-name 书房电脑 # 手机端「我的电脑」里显示的名字
+npx nx-rt serve --plain                # 旧普通模式（见下）
+npx nx-rt test "这是一段测试文本"       # 本地注入测试，不经过公网
+npx nx-rt doctor                       # 环境自检（平台/权限/二进制）
+npx nx-rt binary                       # 查看注入引擎二进制路径
 ```
 
 **旧普通模式（`--plain`）**：v0.2.0 前的 serve 行为——接收 `/push` 接口与外部脚本推来的整句明文，
@@ -197,20 +241,42 @@ curl -X POST http://127.0.0.1:8899/push \
 |---|---|---|
 | GET | `/health` | 存活探针 |
 | GET | `/stats` | 连接数 / 消息数 / 转发成功率 |
-| GET | `/clients` | 当前在线客户端列表 |
+| GET | `/clients` | 当前在线客户端列表（**开启统一登录后要求带设备令牌，且只回自己的设备**） |
 | GET | `/records?limit=N` | 最近 N 条转录记录 |
-| POST | `/push` | 推送文本，body `{clientId, text}` |
+| POST | `/push` | 推送文本，body `{clientId, text}`（开启统一登录后必须带 `Authorization: Bearer <设备令牌>`） |
+| GET | `/auth/oidc/config` | 统一登录公开参数（`enabled` / `idpAvailable` / 端点；**响应永不含 secret**） |
+| POST | `/auth/verify` | 用认证中心 access_token 换本服务设备令牌 + 会话密钥 |
+| POST | `/auth/oidc/callback` | 授权码 + PKCE verifier 换令牌（GET 明确拒绝：服务端不代理浏览器流程） |
+| GET | `/my/devices` | **我名下的电脑**（按令牌 `sub` 过滤，含各自 `sessionKey` 与在线状态） |
 
-`/push` 返回的 `status` 取值：
+`/push` 与 WS 文本路由返回的 `status` 取值：
 
 - `forwarded` — 成功转发给目标客户端
 - `target_offline` — 目标 PC 未上线
+- `unregistered_target` — 目标从未登记过属主（开启统一登录后不放行未知设备）
+- `forbidden` — **调用者与目标设备不是同一个属主**（同时落 warning 日志，这是最像
+  "有人在试探别人电脑"的信号）
 - `rejected_empty` — 文本为空或纯空白
 - `send_failed` — 写入 WS 失败
 
 ### WebSocket 消息
 
 客户端上线后先发 `register`（区分 `pc` / `phone` 角色），服务端回 `registered`。
+
+```jsonc
+// PC → 服务端（统一登录）
+{ "type": "register", "role": "pc", "clientId": "pc-abc123",
+  "deviceToken": "<服务端签发的设备令牌>", "deviceName": "书房电脑",
+  "sessionKey": "<可选，自带初值；缺省由服务端生成>" }
+
+// 服务端 → PC：会话密钥以服务端为准，客户端收到后热切换
+{ "type": "registered", "role": "pc", "clientId": "pc-abc123",
+  "sessionKey": "…", "device": { "owner": "<认证中心 sub>", … } }
+```
+
+开启统一登录后的三条硬判据（各有 e2e 用例）：缺/错 `deviceToken` → 关闭码 **4401**；
+`deviceToken` 里的 `cid` 必须与上报 `clientId` 逐字相等（所以手机端那枚空 `cid` 的
+用户令牌注册不成 pc）；未 `register` 成功前发任何 `text` / `ack` → **4403**。
 
 文本推送走单行 JSON：
 

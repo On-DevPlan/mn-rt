@@ -840,6 +840,294 @@ test('platform.cacheDir：NX_RT_CACHE 优先，默认落在 ~/.nx-rt/binaries', 
   }
 });
 
+// ==================== 统一登录：配置层 ====================
+
+console.log('\n== 统一登录：config 层 ==');
+
+test('httpBaseFromWs：ws/wss 同源推导，端口与协议都对', () => {
+  const { httpBaseFromWs } = require('../lib/config');
+  assert.strictEqual(httpBaseFromWs('ws://1.94.101.189:8790/ws'), 'http://1.94.101.189:8790');
+  assert.strictEqual(httpBaseFromWs('wss://example.com/ws'), 'https://example.com');
+  assert.strictEqual(httpBaseFromWs(''), null);
+  assert.strictEqual(httpBaseFromWs('不是地址'), null);
+});
+
+test('saveConnectionConfig → loadConfig：deviceToken/sessionKey/authUser 存了能读回', () => {
+  withTempHome(() => {
+    const { loadConfig, saveConnectionConfig } = require('../lib/config');
+    const r = saveConnectionConfig({
+      url: 'ws://1.94.101.189:8790/ws',
+      deviceToken: 'dev.abc',
+      sessionKey: 'SESSKEY1',
+      deviceName: '书房电脑',
+      authUser: { userId: 'u-1', email: 'a@b.c' },
+    });
+    assert.strictEqual(r.changed, true);
+    const cfg = loadConfig({});
+    assert.strictEqual(cfg.deviceToken, 'dev.abc');
+    assert.strictEqual(cfg.sessionKey, 'SESSKEY1');
+    assert.strictEqual(cfg.deviceName, '书房电脑');
+    assert.deepStrictEqual(cfg.authUser, { userId: 'u-1', email: 'a@b.c' });
+    // serverHttp 从 url 自动推导，用户不必填第二遍
+    assert.strictEqual(cfg.serverHttp, 'http://1.94.101.189:8790');
+  });
+});
+
+test('--key 覆盖存盘的 sessionKey（临时连老服务器不必先清配置）', () => {
+  withTempHome(() => {
+    const { loadConfig, saveConnectionConfig } = require('../lib/config');
+    saveConnectionConfig({ sessionKey: 'SERVERKEY' });
+    assert.strictEqual(loadConfig({ key: 'MANUAL' }).sessionKey, 'MANUAL');
+    assert.strictEqual(loadConfig({}).sessionKey, 'SERVERKEY');
+  });
+});
+
+test('sessionKey 回退到老的 alignKey：未登录用户保持旧行为', () => {
+  withTempHome(() => {
+    const { loadConfig, saveConnectionConfig } = require('../lib/config');
+    saveConnectionConfig({ alignKey: 'LEGACYKEY' });
+    const cfg = loadConfig({});
+    assert.strictEqual(cfg.sessionKey, 'LEGACYKEY');
+    assert.strictEqual(cfg.alignKey, 'LEGACYKEY');
+    assert.strictEqual(cfg.deviceToken, null);
+  });
+});
+
+test('clearAuthCredentials：只抹统一登录产物，alignKey/token 原样保留', () => {
+  withTempHome(() => {
+    const fs2 = require('fs');
+    const { loadConfig, saveConnectionConfig, clearAuthCredentials, configFile } = require('../lib/config');
+    saveConnectionConfig({
+      alignKey: 'LEGACYKEY', token: 'RTTOKEN',
+      deviceToken: 'dev.abc', sessionKey: 'SESSKEY1', authUser: { userId: 'u-1' },
+    });
+    assert.strictEqual(clearAuthCredentials().changed, true);
+    const left = JSON.parse(fs2.readFileSync(configFile(), 'utf8'));
+    assert.ok(!('deviceToken' in left));
+    assert.ok(!('sessionKey' in left));
+    assert.ok(!('authUser' in left));
+    assert.strictEqual(left.alignKey, 'LEGACYKEY');
+    assert.strictEqual(left.token, 'RTTOKEN');
+    const cfg = loadConfig({});
+    assert.strictEqual(cfg.deviceToken, null);
+    assert.strictEqual(cfg.sessionKey, 'LEGACYKEY'); // 退回旧配对 key
+    assert.strictEqual(clearAuthCredentials().changed, false); // 幂等
+  });
+});
+
+// ==================== 统一登录：auth.js 参数构造 ====================
+
+console.log('\n== 统一登录：auth.js ==');
+
+test('createAuthRequest：发出的 state 就是回来要比对的 state', () => {
+  // 回归用例：曾经 req.state 与 authorizeParams.state 是两个独立随机值，
+  // 调用方先发后者、再拿前者比对 → 每次登录必然报「state 不一致」。
+  const { createAuthRequest } = require('../lib/auth');
+  const req = createAuthRequest('http://127.0.0.1:9/callback');
+  assert.strictEqual(req.authorizeParams.state, req.state);
+  assert.strictEqual(req.authorizeParams.redirect_uri, 'http://127.0.0.1:9/callback');
+  assert.strictEqual(req.authorizeParams.code_challenge_method, 'S256');
+  // PKCE 契约：challenge 必须是 verifier 的 SHA-256（base64url 无填充）
+  const crypto = require('crypto');
+  const expect = crypto.createHash('sha256').update(req.verifier).digest()
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  assert.strictEqual(req.authorizeParams.code_challenge, expect);
+});
+
+test('createAuthRequest：每次调用 verifier/state 都不同（不可预测）', () => {
+  const { createAuthRequest } = require('../lib/auth');
+  const a = createAuthRequest('http://127.0.0.1:1/cb');
+  const b = createAuthRequest('http://127.0.0.1:1/cb');
+  assert.notStrictEqual(a.verifier, b.verifier);
+  assert.notStrictEqual(a.state, b.state);
+});
+
+// ==================== 统一登录：register 帧 ====================
+
+console.log('\n== 统一登录：ws-client register 帧 ==');
+
+/** 假 WebSocket：记录发出的帧，允许测试主动推 message / 触发 close。 */
+function fakeWs() {
+  const sent = [];
+  const handlers = {};
+  const inst = {
+    readyState: 1, // OPEN
+    sent,
+    on(name, fn) { handlers[name] = fn; },
+    send(data) { sent.push(JSON.parse(data)); },
+    ping() {},
+    close() {},
+    emit(name, ...args) { return handlers[name] && handlers[name](...args); },
+    frameCount: 0,
+  };
+  function WebSocketImpl(url, opts) {
+    WebSocketImpl.instance = inst;
+    inst.url = url;
+    inst.opts = opts;
+    return inst;
+  }
+  WebSocketImpl.OPEN = 1;
+  return WebSocketImpl;
+}
+
+test('register 帧携带 deviceToken / deviceName / sessionKey', () => {
+  const { ServeClient } = require('../lib/ws-client');
+  const WebSocketImpl = fakeWs();
+  const c = new ServeClient({
+    url: 'ws://h/ws', clientId: 'pc-1', logger: null, WebSocketImpl,
+    deviceToken: 'dev.abc', deviceName: '书房电脑', sessionKey: 'SESSKEY1',
+  });
+  c.connect();
+  WebSocketImpl.instance.emit('open');
+  const reg = WebSocketImpl.instance.sent[0];
+  assert.strictEqual(reg.type, 'register');
+  assert.strictEqual(reg.role, 'pc');
+  assert.strictEqual(reg.clientId, 'pc-1');
+  assert.strictEqual(reg.deviceToken, 'dev.abc');
+  assert.strictEqual(reg.deviceName, '书房电脑');
+  assert.strictEqual(reg.sessionKey, 'SESSKEY1');
+  c.close();
+});
+
+test('未登录时 register 帧不出现这三个字段（老服务器收到的报文与旧版逐字一致）', () => {
+  const { ServeClient } = require('../lib/ws-client');
+  const WebSocketImpl = fakeWs();
+  const c = new ServeClient({ url: 'ws://h/ws', clientId: 'pc-1', WebSocketImpl });
+  c.connect();
+  WebSocketImpl.instance.emit('open');
+  const reg = WebSocketImpl.instance.sent[0];
+  assert.ok(!('deviceToken' in reg), `不该有 deviceToken: ${JSON.stringify(reg)}`);
+  assert.ok(!('deviceName' in reg), '不该有 deviceName');
+  assert.ok(!('sessionKey' in reg), '不该有 sessionKey');
+  assert.ok(!('token' in reg), '不该有 token');
+  c.close();
+});
+
+test('服务端下发 sessionKey → 采纳、上抛事件；回同样的值不重复上抛', () => {
+  const { ServeClient } = require('../lib/ws-client');
+  const WebSocketImpl = fakeWs();
+  const c = new ServeClient({
+    url: 'ws://h/ws', clientId: 'pc-1', WebSocketImpl, deviceToken: 'dev.abc', sessionKey: 'OLD',
+  });
+  const got = [];
+  c.on('session-key', (k) => got.push(k));
+  c.connect();
+  WebSocketImpl.instance.emit('open');
+  WebSocketImpl.instance.emit('message', JSON.stringify({ type: 'registered', role: 'pc', clientId: 'pc-1', sessionKey: 'NEW' }));
+  assert.deepStrictEqual(got, ['NEW']);
+  assert.strictEqual(c.sessionKey, 'NEW');
+  // 重连时服务端回同一把：不该再触发一次落盘
+  WebSocketImpl.instance.emit('message', JSON.stringify({ type: 'registered', role: 'pc', clientId: 'pc-1', sessionKey: 'NEW' }));
+  assert.deepStrictEqual(got, ['NEW']);
+  c.close();
+});
+
+test('close 4401（要求统一登录）停止重连并上抛 auth-rejected', () => {
+  const { ServeClient } = require('../lib/ws-client');
+  const WebSocketImpl = fakeWs();
+  const c = new ServeClient({ url: 'ws://h/ws', clientId: 'pc-1', WebSocketImpl });
+  let rejected = null;
+  c.on('auth-rejected', (e) => { rejected = e; });
+  c.connect();
+  WebSocketImpl.instance.emit('open');
+  WebSocketImpl.instance.emit('close', 4401, 'auth required');
+  assert.ok(rejected, '应上抛 auth-rejected');
+  assert.strictEqual(rejected.code, 4401);
+  assert.strictEqual(c.reconnectTimer, null, '不该安排重连');
+  c.close();
+});
+
+test('普通断线（1006）仍然安排重连——不能把 4401 的逻辑误扩大', () => {
+  const { ServeClient } = require('../lib/ws-client');
+  const WebSocketImpl = fakeWs();
+  const c = new ServeClient({ url: 'ws://h/ws', clientId: 'pc-1', baseBackoffMs: 50, WebSocketImpl });
+  let rejected = false;
+  c.on('auth-rejected', () => { rejected = true; });
+  c.connect();
+  WebSocketImpl.instance.emit('open');
+  WebSocketImpl.instance.emit('close', 1006, '');
+  assert.strictEqual(rejected, false);
+  assert.ok(c.reconnectTimer, '普通断线必须重连');
+  c.close();
+});
+
+// ==================== 统一登录：会话密钥热切换 ====================
+
+console.log('\n== 统一登录：rt-align setKey ==');
+
+test('setKey 后新密钥能解、旧密钥的信封解不开', () => {
+  const { RtAlignSession } = require('../lib/rt-align');
+  const rtCrypto = require('../lib/rt-crypto');
+  const kA = rtCrypto.generateKey();
+  const kB = rtCrypto.generateKey();
+  const a = new RtAlignSession({ key: kA, sendAck: () => {} });
+  // AAD 里的 room 来自派生结果，不是随便一个标签——必须按 kB 派生出来的 room 封，
+  // 否则这条测试会因为 AAD 不匹配而"假通过"（看起来验证了密钥，其实验证了别的）
+  const dB = rtCrypto.deriveFromKey(kB);
+  const env = rtCrypto.seal(dB.keyPhoneToPc, rtCrypto.buildAad(dB.room, 'p2c', 1), { text: 'hi' });
+  const feed = (sid) => a.handleIncoming(JSON.stringify({ ...env, sid, seq: 1 }));
+
+  feed('s1');
+  assert.strictEqual(a.stats.envelopesBad, 1, 'kB 的信封在 kA 会话下必须解不开');
+  assert.strictEqual(a.stats.envelopesOk, 0);
+
+  assert.strictEqual(a.setKey(kB), true);
+  feed('s2');
+  assert.strictEqual(a.stats.envelopesOk, 1, '切换后同一个信封必须可解');
+  assert.strictEqual(a.setKey(kB), false, '同值不该重复切换');
+  a.dispose();
+});
+
+test('setKey 只换密钥、不清同步状态（换 key 不得导致已注入内容重打）', () => {
+  const { RtAlignSession } = require('../lib/rt-align');
+  const rtCrypto = require('../lib/rt-crypto');
+  const k = rtCrypto.generateKey();
+  const a = new RtAlignSession({ key: k, sendAck: () => {} });
+  const d = rtCrypto.deriveFromKey(k);
+  const env = rtCrypto.seal(d.keyPhoneToPc, rtCrypto.buildAad(d.room, 'p2c', 7), { text: '已有内容', phoneId: 'p1' });
+  a.handleIncoming(JSON.stringify({ ...env, sid: 'sa', seq: 7 }));
+  assert.strictEqual(a.desiredSeq, 7);
+  a.setKey(rtCrypto.generateKey());
+  assert.strictEqual(a.desiredSeq, 7, '换 key 后 desiredSeq 必须保持');
+  assert.strictEqual(a.mirror, '', 'mirror 也不该被动过');
+  a.dispose();
+});
+
+// ==================== 模块可加载性 ====================
+
+console.log('\n== 每个 lib 模块都必须能加载 ==');
+
+/**
+ * 这条用例看起来像废话，但它抓到过一次真实事故：往块注释里写回环通配地址
+ * （形如 "星号 + 斜杠"）会把注释提前闭合，文件后半段变成代码 —— 语法错。
+ * 如果只靠间接引用去发现，报出来的将是某个八竿子打不着的断言失败
+ * （"createAuthRequest 的 state 不对"），排查方向整个错掉。
+ * 让"文件解析不了"直接以文件名的形式失败在这里。
+ */
+test('lib/*.js 全部可 require（语法与依赖完整）', () => {
+  const fs2 = require('fs');
+  const dir = path.join(__dirname, '..', 'lib');
+  const files = fs2.readdirSync(dir).filter((f) => f.endsWith('.js'));
+  assert.ok(files.length >= 8, `lib 下文件数异常：${files.length}`);
+  for (const f of files) {
+    try {
+      require(path.join(dir, f));
+    } catch (e) {
+      throw new Error(`${f} 加载失败：${e.message}`);
+    }
+  }
+});
+
+test('bin/index.js 语法可解析（不能 require，它会直接跑 main）', () => {
+  const { execFileSync } = require('child_process');
+  const file = path.join(__dirname, '..', 'bin', 'index.js');
+  try {
+    execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+  } catch (e) {
+    throw new Error(`bin/index.js 语法错误：${e.stderr ? e.stderr.toString() : e.message}`);
+  }
+});
+
 run().then(() => {
   console.log('\n========================================');
   console.log(`  通过 ${pass}   失败 ${fail}`);

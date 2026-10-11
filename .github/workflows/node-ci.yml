@@ -56,6 +56,12 @@ jobs:
             echo "OK $f"
           done
 
+      # 统一登录的属主判据必须有地方真的跑起来。写在仓库里没人执行的测试
+      # 不是保护，是安慰剂——尤其是"跨属主不得回显会话密钥"这一类，
+      # 回归时表现是完全静默的（接口照答、服务照起）。
+      - name: 统一登录与属主单元测试
+        run: node --test test/
+
       - name: 启动冒烟测试（/health、/stats、/push 空文本拒绝）
         run: |
           set -euo pipefail
@@ -129,13 +135,50 @@ jobs:
           # help 必须正常输出且列出子命令
           node bin/index.js help | grep -q 'serve'
           node bin/index.js help | grep -q 'doctor'
+          node bin/index.js help | grep -q 'auth login'
+          # auth 子命令必须可达：没登录过时 status 要正常报告"未登录"而不是崩
+          node bin/index.js auth status
+          # 未知子命令必须以非零码退出（静默成功会让脚本调用方以为做了什么）
+          if node bin/index.js auth nosuchsub; then
+            echo "未知 auth 子命令应以非零码退出，实际 0"
+            exit 1
+          fi
           # binary 在没有预置二进制的平台上会以非零码退出（这是正确行为），
           # 因此这里只校验它能正常打印查找路径，不断言退出码。
           node bin/index.js binary || true
 
-      - name: 单元测试（文本预处理 / 队列 / 平台识别）
+      - name: 单元测试（文本预处理 / 队列 / 平台识别 / 统一登录）
         shell: bash
         run: node test/unit.js
+
+  e2e:
+    name: 端到端联调（离线自起服务端）
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 三个 e2e 都同时 require client/lib 与 server/src，
+      # 所以两侧依赖都要装（ws 只装在 client 下，是它们的共同前提）。
+      - name: 安装依赖
+        run: |
+          npm ci --prefix client --omit=optional
+          npm ci --prefix server --omit=optional
+
+      # 统一登录的完整链路：门禁 → 属主绑定 → 跨属主拒绝 → 密钥下发 → 真实信封往返。
+      # 不需要真的认证中心（设备令牌是本服务自签的 HS256，测试里同密钥离签即可），
+      # 所以这条能在 CI 上稳定跑，覆盖的却是与线上完全相同的代码路径。
+      - name: 统一登录端到端
+        run: node test/auth-e2e.js
+
+      - name: 对齐模式端到端（含旧 RT_TOKEN 路径）
+        run: node test/align-e2e.js
+
+      - name: 网页控制台端到端
+        run: node test/webclient-e2e.js
 
   unit:
     name: rust unit

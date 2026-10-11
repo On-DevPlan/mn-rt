@@ -99,6 +99,13 @@ function saveConnectionConfig(cfg) {
   if (cfg.url) relevant.url = cfg.url;
   if (cfg.alignKey) relevant.alignKey = cfg.alignKey;
   if (cfg.token) relevant.token = cfg.token;
+  // 统一登录产物。三个要一起有：只有 deviceToken 而没有 sessionKey，
+  // 下次 serve 就还得退回"人手传配对 key"，等于白登录一趟。
+  if (cfg.deviceToken) relevant.deviceToken = cfg.deviceToken;
+  if (cfg.sessionKey) relevant.sessionKey = cfg.sessionKey;
+  if (cfg.deviceName) relevant.deviceName = cfg.deviceName;
+  if (cfg.authUser) relevant.authUser = cfg.authUser;
+  if (cfg.serverHttp) relevant.serverHttp = cfg.serverHttp;
 
   const file = configFile();
   const existing = readConfigFile();
@@ -113,6 +120,30 @@ function saveConnectionConfig(cfg) {
     } catch {
       // 权限收紧失败不阻断：文件在用户自己的配置目录里
     }
+  }
+  return { changed: true, file };
+}
+
+/**
+ * 登出：抹掉统一登录产物（设备令牌 / 会话密钥 / 身份快照）。
+ *
+ * 刻意**不动** `alignKey` 与 `token`——那是老的"人手传配对 key / RT_TOKEN"路径，
+ * 与统一登录并存，logout 不应该顺手把人家的旧配置清了。
+ * @returns {{changed: boolean, file: string}}
+ */
+function clearAuthCredentials() {
+  const file = configFile();
+  const existing = readConfigFile();
+  const keys = ['deviceToken', 'sessionKey', 'authUser'];
+  const changed = keys.some((k) => existing[k] !== undefined);
+  if (!changed) return { changed: false, file };
+
+  const next = { ...existing };
+  for (const k of keys) delete next[k];
+  fs.mkdirSync(configDir(), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(file, 0o600); } catch { /* 不阻断 */ }
   }
   return { changed: true, file };
 }
@@ -172,6 +203,24 @@ function parseArgs(argv) {
 }
 
 /** 组装最终配置。 */
+/**
+ * 从 WS 地址推出同源的 HTTP 基址。
+ *
+ * 统一登录的接口（/auth/oidc/config、/auth/verify、/my/devices）都挂在
+ * 与 WS **同一个端口**的 HTTP 上（服务端把 WebSocketServer 挂在 httpServer 上），
+ * 所以 ws://host:8790/ws → http://host:8790。让用户再填一遍服务器地址是没必要的摩擦。
+ */
+function httpBaseFromWs(wsUrl) {
+  if (!wsUrl) return null;
+  try {
+    const u = new URL(String(wsUrl));
+    const proto = u.protocol === 'wss:' ? 'https:' : 'http:';
+    return `${proto}//${u.host}`;
+  } catch {
+    return null;
+  }
+}
+
 function loadConfig(flags = {}) {
   const file = readConfigFile();
   const env = process.env;
@@ -207,6 +256,18 @@ function loadConfig(flags = {}) {
     alignKey: flags.key ?? env.REMOTETYPE_KEY ?? file.alignKey ?? null,
     // 注册门禁 token（服务器设 RT_TOKEN 后必须携带同一值才能注册）
     token: flags.token ?? env.REMOTETYPE_TOKEN ?? env.RT_TOKEN ?? file.token ?? null,
+    // ── 统一登录产物 ────────────────────────────────────────────────────────
+    // deviceToken 是服务端签发的设备令牌；sessionKey 取代人手传的配对 key。
+    // 命令行显式给的 --key 优先级高于存盘的 sessionKey：
+    // 让人能临时连一台未走统一登录的老服务器，而不必先清配置。
+    deviceToken: flags.deviceToken ?? env.REMOTETYPE_DEVICE_TOKEN ?? file.deviceToken ?? null,
+    sessionKey: flags.key ?? env.REMOTETYPE_KEY ?? file.sessionKey ?? file.alignKey ?? null,
+    // 设备显示名：fr「我的电脑」列表里看到的那一行。默认取主机名，够用且零配置。
+    deviceName: flags.deviceName ?? env.REMOTETYPE_DEVICE_NAME ?? file.deviceName
+      ?? (os.hostname() || 'pc'),
+    authUser: file.authUser || null,
+    serverHttp: flags.serverHttp ?? env.REMOTETYPE_SERVER_HTTP
+      ?? file.serverHttp ?? httpBaseFromWs(url),
     // 文本中 '\n' 的换行方式（透传 rust 的 enter_mode）：
     //   'raw'（默认）旧行为；'enter' 单击 Enter；'shift_enter' 敲 Shift+Enter。
     //   后两者用于「Enter=发送」的输入框（IM、Web 聊天框）；非法值由 rust 拒绝并报错。
@@ -246,6 +307,8 @@ module.exports = {
   readConfigFile,
   migrateLegacyConfigDir,
   saveConnectionConfig,
+  clearAuthCredentials,
   resolveEnterMode,
+  httpBaseFromWs,
   DEFAULT_SERVE_URL,
 };

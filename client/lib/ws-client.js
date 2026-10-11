@@ -17,6 +17,9 @@ class ServeClient extends EventEmitter {
    * @param {string} opts.url             ws:// 或 wss:// 地址
    * @param {string} opts.clientId        本机唯一标识（用于服务端路由）
    * @param {string} [opts.token]         注册门禁 token（服务器设 RT_TOKEN 后必须携带）
+   * @param {string} [opts.deviceToken]   统一登录签发的设备令牌（注册后服务端绑定属主）
+   * @param {string} [opts.deviceName]    设备显示名（供 fr「我的电脑」列表展示）
+   * @param {string} [opts.sessionKey]    会话密钥（hex）；缺省时由服务端下发
    * @param {object} opts.logger
    * @param {number} [opts.maxBackoffMs]  退避上限，默认 10000
    * @param {number} [opts.baseBackoffMs] 退避基数，默认 1000
@@ -27,6 +30,9 @@ class ServeClient extends EventEmitter {
     this.url = opts.url;
     this.clientId = opts.clientId;
     this.token = opts.token ?? null;
+    this.deviceToken = opts.deviceToken ?? null;
+    this.deviceName = opts.deviceName ?? null;
+    this.sessionKey = opts.sessionKey ?? null;
     this.logger = opts.logger;
     this.baseBackoffMs = opts.baseBackoffMs ?? 1000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 10000;
@@ -77,7 +83,19 @@ class ServeClient extends EventEmitter {
       this.backoffMs = this.baseBackoffMs; // 成功后重置退避
       this.logger?.info('connected to serve', { url: this.url });
       // 声明身份，服务端据此建立路由；token 仅在配置时携带
-      this._send({ type: 'register', role: 'pc', clientId: this.clientId, token: this.token || undefined });
+      //
+      // 统一登录：带 deviceToken 时服务端会把本设备绑定到令牌属主，并在 registered 帧里
+      // 回下发 sessionKey（对齐信封的会话密钥）。不带 deviceToken 走老路径——服务端未开启
+      // RT_AUTH_ENABLED 时仍然可用，两者互不干扰。
+      this._send({
+        type: 'register',
+        role: 'pc',
+        clientId: this.clientId,
+        token: this.token || undefined,
+        deviceToken: this.deviceToken || undefined,
+        deviceName: this.deviceName || undefined,
+        sessionKey: this.sessionKey || undefined,
+      });
       this._startPing();
       this.emit('connected');
     });
@@ -100,7 +118,15 @@ class ServeClient extends EventEmitter {
       }
       if (msg.type === 'welcome' || msg.type === 'registered' || msg.type === 'pong') {
         this.logger?.debug(`serve frame: ${msg.type}`, msg);
-        if (msg.type === 'registered') this.emit('registered', msg);
+        if (msg.type === 'registered') {
+          // 服务端下发的会话密钥优先采纳：它跨设备重启稳定（同一 clientId 回同一把 key），
+          // 本机自带的只是初值。采纳后落盘，下次裸命令直连不必再走登录。
+          if (msg.sessionKey && msg.sessionKey !== this.sessionKey) {
+            this.sessionKey = msg.sessionKey;
+            this.emit('session-key', msg.sessionKey);
+          }
+          this.emit('registered', msg);
+        }
         return;
       }
       if (msg.type === 'ack') {
@@ -125,12 +151,18 @@ class ServeClient extends EventEmitter {
         this.logger?.info('websocket closed by user', { code, reason: why });
         return;
       }
-      // 4403 = 注册门禁拒绝（token 缺失/错误）：同样的 token 重连必然同样被拒，
-      // 无限重试只会刷屏，这里停止重连并上抛，交给上层提示用户检查配置。
-      if (code === 4403) {
-        this.logger?.error('注册被服务端拒绝（token 无效或缺失），已停止重连', { reason: why });
+      // 4403 = 注册门禁拒绝（token 缺失/错误）；4401 = 统一登录未通过（缺设备令牌或已失效）。
+      // 两者都是"同样的凭据重连必然同样被拒"，无限重试只会刷屏，
+      // 这里停止重连并上抛，交给上层提示用户检查配置 / 重新 auth login。
+      if (code === 4403 || code === 4401) {
+        this.logger?.error(
+          code === 4401
+            ? '服务端要求统一登录（设备令牌缺失或已过期），已停止重连；请执行 mn-rt auth login'
+            : '注册被服务端拒绝（token 无效或缺失），已停止重连',
+          { code, reason: why },
+        );
         this.authRejected = true;
-        this.emit('auth-rejected', { reason: why });
+        this.emit('auth-rejected', { code, reason: why });
         return;
       }
       this.logger?.warn('websocket closed, will reconnect', { code, reason: why });

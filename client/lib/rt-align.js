@@ -69,6 +69,7 @@ class RtAlignSession extends EventEmitter {
     this._sendAckTransport = opts.sendAck;
 
     const derived = deriveFromKey(opts.key);
+    this.key = opts.key;           // setKey() 用它判断是否真的要换
     this.room = derived.room; // 仅作 AAD 上下文标签，不再用于路由
     this.keyPhoneToPc = derived.keyPhoneToPc;
     this.keyPcToPhone = derived.keyPcToPhone;
@@ -94,6 +95,24 @@ class RtAlignSession extends EventEmitter {
     // 快照拉取定时器顺带驱动，独立成引擎后自备 30s 巡检）
     this._watchdogTimer = setInterval(() => this.busyWatchdog(), 30000);
     this._watchdogTimer.unref?.();
+  }
+
+  /**
+   * 换一把配对 key（统一登录下服务端会在 registered 帧里下发权威 sessionKey）。
+   *
+   * 只重推导密钥、不动同步状态：mirror / desiredSeq / busy 描述的是"注入了什么"，
+   * 与"用哪把 key 解密"无关；换 key 时把状态清零反而会让已注入内容被重复补打。
+   * 与对端 key 不一致的表现为紧接着的 decrypt-error，日志会直说。
+   */
+  setKey(key) {
+    if (!key || key === this.key) return false;
+    const derived = deriveFromKey(key);
+    this.key = key;
+    this.room = derived.room;
+    this.keyPhoneToPc = derived.keyPhoneToPc;
+    this.keyPcToPhone = derived.keyPcToPhone;
+    this.logger?.info('align 会话密钥已切换为服务端下发值');
+    return true;
   }
 
   /** 停止内部定时器（上层优雅退出时调用；unref 下不调也不阻塞进程退出）。 */
