@@ -39,6 +39,38 @@ function readConfigFile() {
   }
 }
 
+/**
+ * 保存本次成功连接使用的连接参数（url / alignKey / token）到配置文件，
+ * 作为下次运行的默认值——「最后一次成功连接 = 下次默认」。
+ *
+ * 只写传入对象里的非空字段（未携带的字段保留文件里已有的值，绝不抹掉）；
+ * 与文件现状无差异时不重写。合并写入，文件里其他字段原样保留。
+ * @param {object} cfg loadConfig 产物（读 url/alignKey/token 字段）
+ * @returns {{changed: boolean, file: string}}
+ */
+function saveConnectionConfig(cfg) {
+  const relevant = {};
+  if (cfg.url) relevant.url = cfg.url;
+  if (cfg.alignKey) relevant.alignKey = cfg.alignKey;
+  if (cfg.token) relevant.token = cfg.token;
+
+  const file = configFile();
+  const existing = readConfigFile();
+  const changed = Object.keys(relevant).some((k) => existing[k] !== relevant[k]);
+  if (!changed) return { changed: false, file };
+
+  fs.mkdirSync(configDir(), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify({ ...existing, ...relevant }, null, 2)}\n`, 'utf8');
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {
+      // 权限收紧失败不阻断：文件在用户自己的配置目录里
+    }
+  }
+  return { changed: true, file };
+}
+
 /** 生成/持久化 clientId：首次运行按 主机名-随机串 生成并落盘，保证稳定路由。 */
 function ensureClientId() {
   const dir = configDir();
@@ -133,6 +165,8 @@ function loadConfig(flags = {}) {
     //   'raw'（默认）旧行为；'enter' 单击 Enter；'shift_enter' 敲 Shift+Enter。
     //   后两者用于「Enter=发送」的输入框（IM、Web 聊天框）；非法值由 rust 拒绝并报错。
     enterMode: flags.enterMode ?? env.REMOTETYPE_ENTER_MODE ?? file.enterMode ?? 'raw',
+    // 连通后把 url/key/token 存入配置文件（下次裸命令直连）；--no-save 本次不落盘
+    noSave: flags.noSave === true,
     configDir: configDir(),
     configFile: configFile(),
     target,
@@ -164,6 +198,7 @@ module.exports = {
   configFile,
   ensureClientId,
   readConfigFile,
+  saveConnectionConfig,
   resolveEnterMode,
   DEFAULT_SERVE_URL,
 };

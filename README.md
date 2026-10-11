@@ -144,6 +144,15 @@ npm install -g nx-rt
 remotetype serve --url ws://your-server.example.com:8790/ws
 ```
 
+**连接记忆（0.5.1 起）**：连接成功后本次的 `--url` / `--key` / `--token` 自动存入
+`~/.remotetype/config.json`（`--no-save` 本次不落盘），之后**裸命令直连**：
+
+```bash
+npx nx-rt        # 等价 serve，用最后一次成功连接的参数
+```
+
+key 会随配置一起保存——重启用同一 key，手机端无需重新配对。配置文件含 key，勿提交仓库或外传。
+
 首次运行会自动生成并持久化 `clientId`（存于 `~/.remotetype/client-id`），用于服务端按目标路由。
 
 常用参数：

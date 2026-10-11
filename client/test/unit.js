@@ -664,6 +664,86 @@ test('resolveEnterMode：两级都无 → raw', () => {
   assert.strictEqual(resolveEnterMode(undefined, undefined), 'raw');
 });
 
+// ================= saveConnectionConfig：连通后保存连接参数 =================
+
+const os = require('os');
+
+/** 建一个隔离的 REMOTETYPE_HOME 临时目录，测后清理。 */
+function withTempHome(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-cfg-test-'));
+  const prev = process.env.REMOTETYPE_HOME;
+  process.env.REMOTETYPE_HOME = dir;
+  try {
+    fn(dir);
+  } finally {
+    if (prev === undefined) delete process.env.REMOTETYPE_HOME;
+    else process.env.REMOTETYPE_HOME = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('saveConnectionConfig：全新目录创建 config.json 并写入连接参数', () => {
+  withTempHome((dir) => {
+    const { saveConnectionConfig } = require('../lib/config');
+    const r = saveConnectionConfig({ url: 'ws://1.2.3.4:8790/ws', alignKey: 'KEY1', token: 'T1' });
+    assert.strictEqual(r.changed, true);
+    const saved = JSON.parse(fs.readFileSync(require('../lib/config').configFile(), 'utf8'));
+    assert.strictEqual(saved.url, 'ws://1.2.3.4:8790/ws');
+    assert.strictEqual(saved.alignKey, 'KEY1');
+    assert.strictEqual(saved.token, 'T1');
+  });
+});
+
+test('saveConnectionConfig：合并保留未知字段', () => {
+  withTempHome((dir) => {
+    const { saveConnectionConfig, configFile } = require('../lib/config');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(configFile(), JSON.stringify({ logLevel: 'debug', custom: 'keep-me' }));
+    saveConnectionConfig({ url: 'ws://x', alignKey: 'K' });
+    const saved = JSON.parse(fs.readFileSync(configFile(), 'utf8'));
+    assert.strictEqual(saved.logLevel, 'debug');
+    assert.strictEqual(saved.custom, 'keep-me');
+    assert.strictEqual(saved.alignKey, 'K');
+  });
+});
+
+test('saveConnectionConfig：无变化不重写（changed:false）', () => {
+  withTempHome(() => {
+    const { saveConnectionConfig } = require('../lib/config');
+    saveConnectionConfig({ url: 'ws://same', alignKey: 'K' });
+    const r = saveConnectionConfig({ url: 'ws://same', alignKey: 'K' });
+    assert.strictEqual(r.changed, false);
+  });
+});
+
+test('saveConnectionConfig：空 key/token 不写入不覆盖已有值', () => {
+  withTempHome(() => {
+    const { saveConnectionConfig, configFile } = require('../lib/config');
+    saveConnectionConfig({ url: 'ws://x', alignKey: 'OLD', token: 'T' });
+    // 本次运行没带 key/token（对齐模式自动生成前的空态）：不得把已有值抹掉
+    saveConnectionConfig({ url: 'ws://x', alignKey: null, token: '' });
+    const saved = JSON.parse(fs.readFileSync(configFile(), 'utf8'));
+    assert.strictEqual(saved.alignKey, 'OLD');
+    assert.strictEqual(saved.token, 'T');
+  });
+});
+
+test('saveConnectionConfig → loadConfig 闭环：存了就能读回来', () => {
+  withTempHome(() => {
+    const { saveConnectionConfig, loadConfig } = require('../lib/config');
+    saveConnectionConfig({ url: 'ws://saved:8790/ws', alignKey: 'SAVEDKEY', token: 'TT' });
+    const cfg = loadConfig({});
+    assert.strictEqual(cfg.url, 'ws://saved:8790/ws');
+    assert.strictEqual(cfg.alignKey, 'SAVEDKEY');
+    assert.strictEqual(cfg.token, 'TT');
+  });
+});
+
+test('parseArgs：--no-save 归一化为 noSave', () => {
+  const { flags } = parseArgs(['--no-save']);
+  assert.strictEqual(flags.noSave, true);
+});
+
 run().then(() => {
   console.log('\n========================================');
   console.log(`  通过 ${pass}   失败 ${fail}`);

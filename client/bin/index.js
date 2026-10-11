@@ -31,7 +31,7 @@ const { LocalStore } = require('../lib/store');
 const { Logger } = require('../lib/logger');
 const { sanitize } = require('../lib/sanitize');
 const { findBinary, isSupported, resolveTarget, binaryUrl, cacheDir } = require('../lib/platform');
-const { loadConfig, parseArgs, resolveEnterMode } = require('../lib/config');
+const { loadConfig, parseArgs, resolveEnterMode, saveConnectionConfig, DEFAULT_SERVE_URL } = require('../lib/config');
 
 const pkg = require('../package.json');
 
@@ -58,6 +58,7 @@ ${C.bold}用法${C.reset}
   npx remotetype <command> [options]
 
 ${C.bold}命令${C.reset}
+  ${C.cyan}(无命令)${C.reset}           等价 serve——连通过一次后参数已存盘，npx nx-rt 直接连
   ${C.cyan}serve${C.reset}               启动守护进程：对齐模式（端到端加密，手机输入框与电脑实时对齐，含删除）
   ${C.cyan}serve --plain${C.reset}       兼容旧普通模式：只接收整句明文推送（/push 接口、外部脚本）
   ${C.cyan}test${C.reset} "<文本>"        本地测试：直接调用注入引擎，不连公网
@@ -73,6 +74,7 @@ ${C.bold}选项${C.reset}
   --token <TOKEN>        注册门禁 token（服务器设 RT_TOKEN 后两端都必须携带同一值）
   --enter-mode <mode>    文本换行的注入方式：raw（默认）| enter | shift_enter。
                          微信等「Enter=发送」的输入框用 shift_enter 才能换行
+  --no-save              本次连接不把 url/key/token 写入配置文件
   --log-level <level>    debug | info | warn | error（默认 info）
   --max-queue <n>        本地消息队列上限（默认 100）
   --max-text <n>         单条文本最大长度，超出截断（默认 5000）
@@ -212,6 +214,12 @@ async function cmdServe(cfg) {
     maxQueueSize: cfg.maxQueueSize,
     maxTextLength: cfg.maxTextLength,
   });
+
+  // 首次使用提示：还没有任何已保存的连接参数时，指引用户带参数跑一次
+  if (cfg.url === DEFAULT_SERVE_URL && !cfg.alignKey) {
+    say(`${C.dim}首次使用：npx nx-rt serve --url ws://<服务器>:8790/ws --key <配对key>${C.reset}`);
+    say(`${C.dim}连接成功后参数自动保存，之后裸命令 npx nx-rt 直接连${C.reset}`);
+  }
 
   printPlatformNotes(logger);
 
@@ -437,6 +445,14 @@ async function cmdServe(cfg) {
   });
   serve.on('registered', (msg) => {
     logger.info('服务端已登记本机', { clientId: msg.clientId, role: msg.role });
+    // 连通即保存：本次成功连接的 url/key/token 成为下次默认（--no-save 跳过）
+    if (!cfg.noSave) {
+      const saved = saveConnectionConfig(cfg);
+      if (saved.changed) {
+        say(`${C.dim}已保存连接配置 → ${saved.file}${C.reset}`);
+        say(`${C.dim}下次直接 npx nx-rt 即可用同样参数连接${C.reset}`);
+      }
+    }
   });
 
   serve.on('text', (msg) => {
@@ -724,9 +740,8 @@ async function main() {
   if (flags.version || command === 'version') return printVersion();
   if (flags.help && !command) return printHelp();
   if (!command) {
-    printHelp();
-    process.exitCode = 1;
-    return;
+    // 裸命令 = serve：连通过一次后参数已存盘，npx nx-rt 直接连（最短路径）
+    return cmdServe(loadConfig(flags));
   }
 
   const cfg = loadConfig(flags);
