@@ -1050,6 +1050,20 @@ test('createAuthRequest：每次调用 verifier/state 都不同（不可预测�
   assert.notStrictEqual(a.state, b.state);
 });
 
+test('openBrowserArgs：Windows 路径不得借道 cmd / start（URL 里的 & 会被切）', () => {
+  // 回归用例：早期走 `cmd /c start <url>` 时，cmd.exe 把 & 当命令分隔符，
+  // 浏览器只收到 ?client_id=mn-rt 就报 redirect_uri 不在白名单。
+  // 这条断言钉死：Windows 路径必须直接交给一个不解析 & 的二进制。
+  const { openBrowserArgs } = require('../lib/auth');
+  const [cmd, args] = openBrowserArgs('win32',
+    'http://47.110.80.47:8082/oauth2/auth?client_id=mn-rt&scope=openid+profile+email&state=xyz');
+  assert.notStrictEqual(cmd, 'cmd', 'Windows 绝不能再走 cmd');
+  assert.strictEqual(cmd, 'rundll32');
+  // URL 原文（含 &）必须作为单一参数原样传出去：
+  assert.deepStrictEqual(args, ['url.dll,FileProtocolHandler',
+    'http://47.110.80.47:8082/oauth2/auth?client_id=mn-rt&scope=openid+profile+email&state=xyz']);
+});
+
 // ==================== 统一登录：register 帧 ====================
 
 console.log('\n== 统一登录：ws-client register 帧 ==');

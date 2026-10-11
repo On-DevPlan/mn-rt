@@ -121,14 +121,33 @@ function openLoopback() {
   };
 }
 
+/**
+ * 各平台打开浏览器的命令与参数。
+ *
+ * ── Windows 为什么绝不借道 `cmd /c start` ────────────────────────────────
+ * 授权 URL 里全是 `&`。Node execFile 对不含空格的参数不加引号，命令行到达
+ * cmd.exe 后 `&` 被**当成命令分隔符**：浏览器只收到第一个 `&` 之前的
+ * `?client_id=mn-rt`，redirect_uri / code_challenge 全被切掉，报
+ * 「redirect_uri 未在白名单内」；被切下来的尾段还被 cmd 当命令执行，而
+ * stdio:'ignore' 把那串报错吞得干干净净——故障看起来像"白名单没配对"。
+ * rundll32 的 FileProtocolHandler 不经任何 shell 解析，CreateProcess 的
+ * 命令行原样到达，`&` 安然无恙。这是 Windows 上程序化开 URL 的经典做法。
+ */
+function openBrowserArgs(platform, url) {
+  if (platform === 'darwin') return ['open', [url]];
+  if (platform === 'win32') return ['rundll32', ['url.dll,FileProtocolHandler', url]];
+  return ['xdg-open', [url]];
+}
+
 function openBrowser(url) {
-  const [cmd, args] = process.platform === 'darwin'
-    ? ['open', [url]]
-    : process.platform === 'win32'
-      ? ['cmd', ['/c', 'start', '', url]]
-      : ['xdg-open', [url]];
+  const [cmd, args] = openBrowserArgs(process.platform, url);
   // detached + stdio ignore：不阻塞 CLI，也不让浏览器的输出灌进终端
-  execFile(cmd, args, { detached: true, stdio: 'ignore' }, () => {});
+  execFile(cmd, args, { detached: true, stdio: 'ignore' }, (e) => {
+    if (e) {
+      // 打不开也得让用户有路可走：地址永远已经在上面打印过一份
+      process.stderr.write(`自动打开浏览器失败（${e.message.split('\n')[0]}），请手动打开上面打印的授权地址\n`);
+    }
+  });
 }
 
 /** 向任意 URL 发 JSON / 表单请求并解析 JSON。用内置 http，不引 fetch polyfill。 */
@@ -269,4 +288,4 @@ async function authLogin(opts) {
   };
 }
 
-module.exports = { authLogin, getJson, postJson, createAuthRequest, openLoopback };
+module.exports = { authLogin, getJson, postJson, createAuthRequest, openLoopback, openBrowserArgs };
