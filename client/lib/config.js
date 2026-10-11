@@ -3,7 +3,7 @@
 /**
  * 配置解析：默认值 < 配置文件 < 环境变量 < 命令行参数。
  *
- * 配置文件位置：~/.remotetype/config.json
+ * 配置文件位置：~/.nx-rt/config.json
  * 环境变量前缀：REMOTETYPE_
  */
 
@@ -15,14 +15,60 @@ const { resolveTarget } = require('./platform');
 /** 内置默认公网服务地址（用户可用 --url 或环境变量覆盖）。 */
 const DEFAULT_SERVE_URL = 'wss://remotetype.example.com/ws';
 
-/** 配置目录：~/.remotetype */
+/** 配置目录：~/.nx-rt（旧版 ~/.remotetype / %APPDATA%\remotetype 首次访问自动迁移） */
+let legacyDirMigrated = false;
 function configDir() {
   const base =
-    process.env.REMOTETYPE_HOME ||
-    (process.platform === 'win32'
-      ? path.join(process.env.APPDATA || os.homedir(), 'remotetype')
-      : path.join(os.homedir(), '.remotetype'));
+    process.env.NX_RT_HOME ||
+    process.env.REMOTETYPE_HOME || // 0.5.1 及以前的变量名，仍兼容
+    path.join(os.homedir(), '.nx-rt');
+  if (!legacyDirMigrated) {
+    legacyDirMigrated = true;
+    // 显式指定了目录（测试/多实例）时不做迁移，避免碰真实用户目录
+    if (!process.env.NX_RT_HOME && !process.env.REMOTETYPE_HOME) {
+      migrateLegacyConfigDir(base);
+    }
+  }
   return base;
+}
+
+/** 旧版配置目录（0.5.1 及以前）。 */
+function legacyConfigDirs() {
+  const dirs = [];
+  if (process.platform === 'win32' && process.env.APPDATA) {
+    dirs.push(path.join(process.env.APPDATA, 'remotetype'));
+  }
+  dirs.push(path.join(os.homedir(), '.remotetype'));
+  return dirs;
+}
+
+/**
+ * 一次性迁移：新目录尚不存在时，从旧目录拷贝有状态的小文件
+ * （client-id 保身份、config.json 保连接记忆）；logs/data 属历史产物不迁。
+ * 幂等、静默：任何失败都放弃迁移（大不了重新配对），绝不阻断启动。
+ * @param {string} newDir 新配置目录
+ * @returns {boolean} 是否发生了拷贝
+ */
+function migrateLegacyConfigDir(newDir) {
+  try {
+    if (fs.existsSync(newDir)) return false;
+    for (const oldDir of legacyConfigDirs()) {
+      if (!fs.existsSync(oldDir)) continue;
+      fs.mkdirSync(newDir, { recursive: true });
+      let copied = false;
+      for (const name of ['client-id', 'config.json']) {
+        const src = path.join(oldDir, name);
+        if (fs.existsSync(src)) {
+          fs.copyFileSync(src, path.join(newDir, name));
+          copied = true;
+        }
+      }
+      return copied;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function configFile() {
@@ -198,6 +244,7 @@ module.exports = {
   configFile,
   ensureClientId,
   readConfigFile,
+  migrateLegacyConfigDir,
   saveConnectionConfig,
   resolveEnterMode,
   DEFAULT_SERVE_URL,

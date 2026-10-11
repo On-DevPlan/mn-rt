@@ -668,16 +668,26 @@ test('resolveEnterMode：两级都无 → raw', () => {
 
 const os = require('os');
 
-/** 建一个隔离的 REMOTETYPE_HOME 临时目录，测后清理。 */
+/** 建一个隔离的临时目录并伪装成用户主目录（APPDATA/USERPROFILE），测后还原。 */
 function withTempHome(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-cfg-test-'));
-  const prev = process.env.REMOTETYPE_HOME;
+  const saved = {
+    REMOTETYPE_HOME: process.env.REMOTETYPE_HOME,
+    APPDATA: process.env.APPDATA,
+    USERPROFILE: process.env.USERPROFILE,
+  };
   process.env.REMOTETYPE_HOME = dir;
+  // 迁移逻辑会扫「真实旧目录」（APPDATA\remotetype 与 ~/.remotetype），
+  // 测试期间必须把它们也指进临时区，否则会拷到真机数据
+  process.env.APPDATA = path.join(dir, 'AppData', 'Roaming');
+  process.env.USERPROFILE = path.join(dir, 'home');
   try {
     fn(dir);
   } finally {
-    if (prev === undefined) delete process.env.REMOTETYPE_HOME;
-    else process.env.REMOTETYPE_HOME = prev;
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -742,6 +752,90 @@ test('saveConnectionConfig → loadConfig 闭环：存了就能读回来', () =>
 test('parseArgs：--no-save 归一化为 noSave', () => {
   const { flags } = parseArgs(['--no-save']);
   assert.strictEqual(flags.noSave, true);
+});
+
+// ================= 配置目录 ~/.nx-rt：环境变量优先级 + 旧目录迁移 =================
+
+test('configDir：NX_RT_HOME 优先于 REMOTETYPE_HOME，都无时默认 ~/.nx-rt', () => {
+  const { configDir } = require('../lib/config');
+  const prevX = process.env.NX_RT_HOME;
+  const prevR = process.env.REMOTETYPE_HOME;
+  try {
+    process.env.NX_RT_HOME = 'D:/tmp/nx-a';
+    process.env.REMOTETYPE_HOME = 'D:/tmp/rt-b';
+    assert.strictEqual(configDir(), 'D:/tmp/nx-a');
+    delete process.env.NX_RT_HOME;
+    assert.strictEqual(configDir(), 'D:/tmp/rt-b');
+    delete process.env.REMOTETYPE_HOME;
+    assert.ok(configDir().endsWith('.nx-rt'));
+  } finally {
+    if (prevX === undefined) delete process.env.NX_RT_HOME; else process.env.NX_RT_HOME = prevX;
+    if (prevR === undefined) delete process.env.REMOTETYPE_HOME; else process.env.REMOTETYPE_HOME = prevR;
+  }
+});
+
+test('migrateLegacyConfigDir：拷贝 client-id/config.json，logs/data 不动', () => {
+  withTempHome((dir) => {
+    const fs2 = require('fs');
+    const p = require('path');
+    // withTempHome 已把 APPDATA 指进临时区：这里就是 migrate 会扫到的旧目录
+    const oldDir = p.join(process.env.APPDATA, 'remotetype');
+    fs2.mkdirSync(p.join(oldDir, 'logs'), { recursive: true });
+    fs2.writeFileSync(p.join(oldDir, 'client-id'), 'pc-old-id');
+    fs2.writeFileSync(p.join(oldDir, 'config.json'), '{"url":"ws://old"}');
+    fs2.writeFileSync(p.join(oldDir, 'logs', 'a.log'), 'x');
+    const { migrateLegacyConfigDir } = require('../lib/config');
+    const newDir = p.join(dir, '.nx-rt');
+    assert.strictEqual(migrateLegacyConfigDir(newDir), true);
+    assert.strictEqual(fs2.readFileSync(p.join(newDir, 'client-id'), 'utf8'), 'pc-old-id');
+    assert.strictEqual(fs2.readFileSync(p.join(newDir, 'config.json'), 'utf8'), '{"url":"ws://old"}');
+    assert.ok(!fs2.existsSync(p.join(newDir, 'logs')));
+  });
+});
+
+test('migrateLegacyConfigDir：新目录已存在则不动', () => {
+  withTempHome((dir) => {
+    const fs2 = require('fs');
+    const p = require('path');
+    const oldDir = p.join(process.env.APPDATA, 'remotetype');
+    fs2.mkdirSync(oldDir, { recursive: true });
+    fs2.writeFileSync(p.join(oldDir, 'client-id'), 'pc-old');
+    const newDir = p.join(dir, '.nx-rt');
+    fs2.mkdirSync(newDir, { recursive: true });
+    fs2.writeFileSync(p.join(newDir, 'client-id'), 'pc-new');
+    const { migrateLegacyConfigDir } = require('../lib/config');
+    assert.strictEqual(migrateLegacyConfigDir(newDir), false);
+    assert.strictEqual(fs2.readFileSync(p.join(newDir, 'client-id'), 'utf8'), 'pc-new');
+  });
+});
+
+test('migrateLegacyConfigDir：旧目录不存在返回 false 且不建新目录', () => {
+  withTempHome((dir) => {
+    const fs2 = require('fs');
+    const p = require('path');
+    const { migrateLegacyConfigDir } = require('../lib/config');
+    const newDir = p.join(dir, '.nx-rt');
+    assert.strictEqual(migrateLegacyConfigDir(newDir), false);
+    assert.ok(!fs2.existsSync(newDir));
+  });
+});
+
+test('platform.cacheDir：NX_RT_CACHE 优先，默认落在 ~/.nx-rt/binaries', () => {
+  const platform = require('../lib/platform');
+  const prevC = process.env.NX_RT_CACHE;
+  const prevOld = process.env.REMOTETYPE_CACHE;
+  try {
+    process.env.NX_RT_CACHE = 'D:/tmp/cache-a';
+    assert.strictEqual(platform.cacheDir(), path.join('D:/tmp/cache-a', 'binaries'));
+    delete process.env.NX_RT_CACHE;
+    delete process.env.REMOTETYPE_CACHE;
+    const cachePath = platform.cacheDir();
+    assert.strictEqual(path.basename(path.dirname(cachePath)), '.nx-rt');
+    assert.strictEqual(path.basename(cachePath), 'binaries');
+  } finally {
+    if (prevC === undefined) delete process.env.NX_RT_CACHE; else process.env.NX_RT_CACHE = prevC;
+    if (prevOld === undefined) delete process.env.REMOTETYPE_CACHE; else process.env.REMOTETYPE_CACHE = prevOld;
+  }
 });
 
 run().then(() => {

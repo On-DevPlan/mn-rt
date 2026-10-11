@@ -83,13 +83,12 @@ function findBinary({ platform = process.platform, arch = process.arch, extraDir
   return null;
 }
 
-/** 缓存目录：~/.remotetype/binaries */
+/** 缓存目录：~/.nx-rt/binaries（旧环境变量 REMOTETYPE_CACHE 仍兼容） */
 function cacheDir() {
   const base =
-    process.env.REMOTETYPE_CACHE ||
-    (process.platform === 'win32'
-      ? path.join(process.env.LOCALAPPDATA || os.homedir(), 'remotetype')
-      : path.join(os.homedir(), '.remotetype'));
+    process.env.NX_RT_CACHE ||
+    process.env.REMOTETYPE_CACHE || // 0.5.1 及以前的变量名，仍兼容
+    path.join(os.homedir(), '.nx-rt');
   return path.join(base, 'binaries');
 }
 
