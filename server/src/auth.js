@@ -104,9 +104,22 @@ class AuthHub {
     }
     if (this._endpoints) return this._endpoints;
     const url = `${this.issuer}/.well-known/openid-configuration`;
-    const doc = await this._fetchJson(url, { method: 'GET' });
+    // 失败原因一定要留在身上再抛出。/auth/oidc/config 常常是这件事唯一被看到的
+    // 入口：容器日志人进不去、也没有 UI，如果这里只报"拉不到"，
+    // 那 DNS 失败、出网被防火墙掐、issuer 端口写错、对方返回 HTML
+    // 这四种完全不同的病就只能靠猜。（真实踩过：线上就卡在这里查不下去。）
+    let doc;
+    try {
+      doc = await this._fetchJson(url, { method: 'GET' });
+    } catch (e) {
+      this._discoverError = `${e.message || e}（拉取 ${url}）`;
+      this.logger.warn?.('拉取认证中心发现文档失败', { url, error: this._discoverError });
+      throw e;
+    }
     if (!doc || !doc.token_endpoint || !doc.authorization_endpoint) {
-      throw new Error('发现文档缺少 authorization_endpoint / token_endpoint');
+      this._discoverError = `发现文档缺少 authorization_endpoint / token_endpoint（${url}）`;
+      this.logger.warn?.(this._discoverError);
+      throw new Error(this._discoverError);
     }
     this._endpoints = doc;
     this._discoverError = null;

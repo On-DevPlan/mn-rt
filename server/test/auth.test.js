@@ -508,6 +508,24 @@ test('POST /auth/oidc/callback：授权码+verifier 换到身份并签发设备�
   }
 });
 
+test('拉不到发现文档时，idpError 必须带真实原因而不是兜底文案', async () => {
+  // 观测性判据。_discoverError 曾经只在成功时被置 null，从未写入过错误本身，
+  // 于是 /auth/oidc/config 永远只报"未拉取到发现文档"——线上正是这样卡在
+  // "连不上"三个字上：DNS 失败、出网被防火墙掐、issuer 端口写错、对方返回 HTML
+  // 四种完全不同的病长得一模一样，而容器日志进不去。
+  const a = new AuthHub({
+    enabled: true, issuer: 'http://127.0.0.1:1', clientId: 'mn-rt',
+    jwtSecret: 's', deviceFile: tmpFile('disc'),
+    logger: { warn() {}, info() {} }, httpTimeoutMs: 2000,
+  });
+  await assert.rejects(() => a.discover());
+  const cfg = a.publicConfig();
+  assert.equal(cfg.idpAvailable, false);
+  assert.ok(cfg.idpError && cfg.idpError !== '未拉取到发现文档',
+    `idpError 必须是具体原因，实到：${cfg.idpError}`);
+  assert.ok(/127\.0\.0\.1:1/.test(cfg.idpError), `要带上尝试拉取的地址：${cfg.idpError}`);
+});
+
 test('/auth/oidc/config 的公开视图不含任何密钥', () => {
   const srv = makeAuthedServer('cfg');
   const cfg = srv._internal.auth.publicConfig();
