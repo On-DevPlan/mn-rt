@@ -33,7 +33,7 @@ const { LocalStore } = require('../lib/store');
 const { Logger } = require('../lib/logger');
 const { sanitize } = require('../lib/sanitize');
 const { findBinary, isSupported, resolveTarget, binaryUrl, cacheDir } = require('../lib/platform');
-const { loadConfig, parseArgs, resolveEnterMode, saveConnectionConfig, clearAuthCredentials, readConfigFile, DEFAULT_SERVE_URL } = require('../lib/config');
+const { loadConfig, parseArgs, resolveEnterMode, saveConnectionConfig, clearAuthCredentials, readConfigFile, placeholderUrlReason, DEFAULT_SERVE_URL } = require('../lib/config');
 const { authLogin, getJson } = require('../lib/auth');
 
 const pkg = require('../package.json');
@@ -72,7 +72,7 @@ ${C.bold}命令${C.reset}
   ${C.cyan}binary${C.reset}              打印解析到的注入引擎路径
 
 ${C.bold}选项${C.reset}
-  --url <ws://...>       公网服务地址（默认 ${require('../lib/config').DEFAULT_SERVE_URL}）
+  --url <ws://...>       公网服务地址（默认 ${DEFAULT_SERVE_URL}）
   --client-id <id>       本机唯一标识，服务端按此路由（默认自动生成并持久化）
   --key <KEY>            手动指定配对/会话 key（统一登录下由服务端自动下发，一般不需要）
   --server-http <url>    统一登录用的 HTTP 基址（默认从 --url 推导：ws://h:p/ws → http://h:p）
@@ -220,6 +220,16 @@ async function cmdAuth(cfg, sub) {
       process.exitCode = 1;
       return;
     }
+    // 地址是占位/保留域名时当场说清楚，不要拿一句 getaddrinfo 去糊用户。
+    // 这一条是被真实反馈逼出来的：不带 --url 直接 auth login 时，
+    // 打印出来的是脚手架默认的 remotetype.example.com，报的却是裸 DNS 错。
+    const badUrl = placeholderUrlReason(cfg.serverHttp) || placeholderUrlReason(cfg.url);
+    if (badUrl) {
+      say(`${C.red}✗ 服务端地址无效${C.reset}：${badUrl}`);
+      say(`${C.dim}带上真实地址重试：npx nx-rt auth login --url ws://<服务器>:8790/ws${C.reset}`);
+      process.exitCode = 1;
+      return;
+    }
     say(`${C.dim}服务端：${cfg.serverHttp}${C.reset}`);
     say(`${C.dim}本机标识：${cfg.clientId}    设备名：${cfg.deviceName}${C.reset}`);
 
@@ -361,11 +371,22 @@ async function cmdServe(cfg) {
     maxTextLength: cfg.maxTextLength,
   });
 
-  // 首次使用提示：既没登录过、也没有配对 key，才给这条老路径的指引
-  if (cfg.url === DEFAULT_SERVE_URL && !cfg.sessionKey && !cfg.deviceToken) {
-    say(`${C.dim}首次使用（推荐统一登录）：npx nx-rt auth login --url ws://<服务器>:8790/ws${C.reset}`);
-    say(`${C.dim}或沿用旧手动配对：      npx nx-rt serve --url ws://<服务器>:8790/ws --key <配对key>${C.reset}`);
-    say(`${C.dim}连接成功后参数自动保存，之后裸命令 npx nx-rt 直接连${C.reset}`);
+  // 未登录、也没有配对 key：说清这次要连的是内置服务器，并给出两条路。
+  // 不写成"请先用 --url 指定服务器"——内置默认值就是真部署地址，
+  // 那种提示会让人以为必须带参数，而带参数的老写法恰恰不是推荐路径。
+  if (!cfg.sessionKey && !cfg.deviceToken) {
+    say(`${C.dim}将连接内置服务器 ${cfg.url}${C.reset}`);
+    say(`${C.dim}  推荐（免配 key）：npx nx-rt auth login${C.reset}`);
+    say(`${C.dim}  旧手动配对：      npx nx-rt serve --key <电脑端打印的key>${C.reset}`);
+    say(`${C.dim}连上一次后参数自动保存，之后裸命令 npx nx-rt 直接连${C.reset}`);
+  }
+  // 配置里还留着 0.5.2 之前那份占位地址的设备：当场说破，别抛裸 DNS 错
+  const badServeUrl = placeholderUrlReason(cfg.url);
+  if (badServeUrl) {
+    say(`${C.red}✗ 服务地址无效${C.reset}：${badServeUrl}`);
+    say(`${C.dim}带上真实地址重试：npx nx-rt serve --url ws://<服务器>:8790/ws${C.reset}`);
+    process.exitCode = 1;
+    return;
   }
 
   printPlatformNotes(logger);

@@ -852,6 +852,33 @@ test('httpBaseFromWs：ws/wss 同源推导，端口与协议都对', () => {
   assert.strictEqual(httpBaseFromWs('不是地址'), null);
 });
 
+test('内置默认服务地址必须是一个真能连的地址（不得是脚手架占位值）', () => {
+  // 回归用例：默认值曾是 wss://remotetype.example.com/ws —— 一个永远不会解析的
+  // RFC 2606 保留域。只有 `serve --url ...` 的年代它无害；README 把
+  // `npx nx-rt auth login` 写成推荐用法后，零参数路径必然失败，
+  // 而用户看到的是裸 getaddrinfo ENOTFOUND。真实用户在另一台机器上踩到了。
+  const { DEFAULT_SERVE_URL, placeholderUrlReason, httpBaseFromWs } = require('../lib/config');
+  assert.ok(placeholderUrlReason(DEFAULT_SERVE_URL) === null,
+    `默认服务地址仍是占位值：${DEFAULT_SERVE_URL}`);
+  assert.ok(!/example\.(com|net|org)|\.test$|\.invalid$/i.test(DEFAULT_SERVE_URL),
+    '默认值不得落在保留域上');
+  // 更要紧的是：默认值推导出的 HTTP 基址得是真的那台部署机（auth login 走 HTTP）
+  assert.equal(httpBaseFromWs(DEFAULT_SERVE_URL), 'http://1.94.101.189:8790');
+});
+
+test('placeholderUrlReason 认出占位/保留域，但放过 localhost 与真实 IP', () => {
+  const { placeholderUrlReason } = require('../lib/config');
+  assert.ok(placeholderUrlReason('wss://remotetype.example.com/ws'), '老配置里的占位值必须被抓出');
+  assert.ok(placeholderUrlReason('http://foo.test'), 'RFC 2606 保留 TLD');
+  assert.ok(placeholderUrlReason('ws://a.example.com/ws'), '保留二级域');
+  assert.ok(placeholderUrlReason(''), '空值');
+  assert.ok(placeholderUrlReason('完全不是个地址'), '畸形值');
+  // 这些是真能用的形态，一律放过
+  assert.equal(placeholderUrlReason('ws://1.94.101.189:8790/ws'), null);
+  assert.equal(placeholderUrlReason('ws://localhost:8790/ws'), null, '本机部署是合法用法');
+  assert.equal(placeholderUrlReason('wss://rt.mydomain.com/ws'), null);
+});
+
 test('saveConnectionConfig → loadConfig：deviceToken/sessionKey/authUser 存了能读回', () => {
   withTempHome(() => {
     const { loadConfig, saveConnectionConfig } = require('../lib/config');

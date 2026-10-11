@@ -12,8 +12,27 @@ const os = require('os');
 const path = require('path');
 const { resolveTarget } = require('./platform');
 
-/** 内置默认公网服务地址（用户可用 --url 或环境变量覆盖）。 */
-const DEFAULT_SERVE_URL = 'wss://remotetype.example.com/ws';
+/**
+ * 内置默认公网服务地址（用户可用 --url 或环境变量覆盖）。
+ *
+ * ── 这里曾经是 `wss://remotetype.example.com/ws` ─────────────────────────
+ * 那是脚手架时期的**占位域名，永远不会解析**。它在只有 `serve --url ...` 的年代
+ * 无害（用户总是带 --url），但 README 把 `npx nx-rt auth login` 写成推荐用法之后，
+ * 零参数路径就必然失败，而失败信息是一句裸的 `getaddrinfo ENOTFOUND`——
+ * 既没说"你用的是默认地址"，也没说"该加 --url"。（真实用户在另一台机器上踩到了。）
+ * 默认值要么是能用的一处，要么就该在用到它时明确报错，两者都不做就是埋雷。
+ *
+ * 现在指向真实部署，与 server/DEPLOY.md 的服务器档案、fr 的 kRemoteTypeServerUrl 同源。
+ */
+const DEFAULT_SERVE_URL = 'ws://1.94.101.189:8790/ws';
+
+/**
+ * 脚手架时代遗留的占位地址。
+ *
+ * 装过 0.5.2 及更早版本、且当时把默认值连配置一起存过盘的设备，配置里可能还留着
+ * `.example.com`。这类值不该"试一次然后抛 DNS 错"，而该当场说清是地址没配。
+ */
+const PLACEHOLDER_HOSTS = ['remotetype.example.com'];
 
 /** 配置目录：~/.nx-rt（旧版 ~/.remotetype / %APPDATA%\remotetype 首次访问自动迁移） */
 let legacyDirMigrated = false;
@@ -221,6 +240,36 @@ function httpBaseFromWs(wsUrl) {
   }
 }
 
+/**
+ * 这个地址是不是一个占位符 / 根本没配。
+ * 返回说明文字表示"是"，null 表示"不是"。
+ *
+ * 判据放在配置层而不是散在各命令里：`auth login` 与 `serve` 都要在真正发请求之前
+ * 先问这一句，否则用户拿到的将是 `getaddrinfo ENOTFOUND`——一句话都不告诉他。
+ * @param {string} url
+ * @returns {string|null}
+ */
+function placeholderUrlReason(url) {
+  if (!url) return '未配置服务地址';
+  let host = '';
+  try {
+    host = new URL(String(url)).hostname;
+  } catch {
+    return `服务地址无法解析：${url}`;
+  }
+  if (PLACEHOLDER_HOSTS.includes(host)) {
+    return `服务地址还是脚手架占位值：${url}`;
+  }
+  // RFC 2606/6761 把这些后缀永久保留给文档与测试，不可能有公网解析结果。
+  // 真出现在配置里就等于"没人把它改成过能用的地址"，比试一次抛 DNS 错诚实得多。
+  const lower = host.toLowerCase();
+  const reserved = ['.example.com', '.example.net', '.example.org', '.test', '.invalid', '.localhost'];
+  if (reserved.some((s) => lower.endsWith(s)) || lower === 'example.com') {
+    return `服务地址指向保留域名：${host}`;
+  }
+  return null;
+}
+
 function loadConfig(flags = {}) {
   const file = readConfigFile();
   const env = process.env;
@@ -310,5 +359,6 @@ module.exports = {
   clearAuthCredentials,
   resolveEnterMode,
   httpBaseFromWs,
+  placeholderUrlReason,
   DEFAULT_SERVE_URL,
 };

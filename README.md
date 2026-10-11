@@ -37,9 +37,10 @@ PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经�
 
 ```bash
 # ── 推荐：统一登录（免掉人工复制 key）· 0.5.3 起 ──
-npx nx-rt auth login --url ws://<server>:8790/ws   # 弹浏览器登录一次
-npx nx-rt                                         # 之后裸命令直连，密钥由服务端下发
-npx nx-rt auth status                             # 我是谁 / 令牌还剩多久 / 本机登记上了吗
+npx nx-rt auth login                                # 弹浏览器登录一次（连内置服务器）
+npx nx-rt                                           # 之后裸命令直连，密钥由服务端下发
+npx nx-rt auth status                               # 我是谁 / 令牌还剩多久 / 本机登记上了吗
+npx nx-rt auth login --url ws://<自建服务器>:8790/ws # 连自己部署的那台
 
 # ── 旧路径：手动配对 key（服务器未开启统一登录时唯一可用）──
 npx nx-rt serve                                   # 不传 --key 则自动生成强随机 key 并打印
@@ -159,10 +160,12 @@ npm start
 
 ```bash
 # 推荐：统一登录一次，之后免配 key
-npx nx-rt auth login --url ws://your-server.example.com:8790/ws
+npx nx-rt auth login
 npx nx-rt
 ```
 
+内置默认连的是 `ws://1.94.101.189:8790/ws`（本仓库 DEPLOY.md 那台）。自建部署或换端口时
+每条命令都带上 `--url ws://<你的服务器>:<端口>/ws` 即可。
 `auth login` 会打开浏览器走统一登录（认证中心 = go-ah auth-hub），回调打到**本机**
 127.0.0.1 的一次性监听，CLI 自己用 PKCE 换 token，全程零复制粘贴；换回的设备令牌与
 会话密钥存入 `~/.nx-rt/config.json`。手机端登录同一账号即可看到你名下的电脑并直连。
