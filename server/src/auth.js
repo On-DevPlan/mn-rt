@@ -345,43 +345,6 @@ class AuthHub {
     return [...this.devices.values()].filter((d) => String(d.userId) === uid);
   }
 
-  /**
-   * 驱逐长期不上线的"死设备"（自动探活的长期半边，实时半边是 WS 心跳）。
-   *
-   * 在线的设备**绝不驱逐**——在线判定由调用方注入（本类看不到 WS 表）。
-   * 对离线设备看 lastSeenAt（每次 serve 连上都会刷新；从未连过的看 registeredAt），
-   * 超过 maxIdleMs 没露面即从注册表删除。
-   *
-   * 删除是自愈的，两端都不会留下一把"对不上"的密钥：
-   *   - CLI 的 register 帧自带它存盘的 sessionKey，服务端没了记录就采纳它，
-   *     所以设备回来重新 serve 时密钥跨驱逐稳定；
-   *   - 手机端从不缓存密钥（每台电脑的 key 随 /my/devices 现取）。
-   *
-   * @param {number} maxIdleMs 离线多久算死；<=0 直接返回（开关关闭）
-   * @param {(clientId: string) => boolean} [isOnline] 在线判定
-   * @returns {string[]} 被驱逐的 clientId 列表
-   */
-  purgeIdleDevices(maxIdleMs, isOnline = () => false) {
-    if (!maxIdleMs || maxIdleMs <= 0) return [];
-    const now = Date.now();
-    const evicted = [];
-    for (const [clientId, d] of this.devices) {
-      if (isOnline(clientId)) continue;
-      const ts = Date.parse(d.lastSeenAt || d.registeredAt || '');
-      // 时间戳缺失/损坏的记录按"死"处理：它已无法证明自己还活着
-      if (!Number.isFinite(ts) || now - ts > maxIdleMs) {
-        this.devices.delete(clientId);
-        evicted.push(clientId);
-      }
-    }
-    if (evicted.length) {
-      this._saveDevices();
-      // 驱逐是删除性写操作，必须落 warning：被"误踢"的属主来问时这是唯一线索
-      this.logger.warn?.('已驱逐长期不上线的设备', { count: evicted.length, evicted });
-    }
-    return evicted;
-  }
-
   // ==================== 持久化 ====================
 
   _loadDevices() {

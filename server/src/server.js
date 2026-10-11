@@ -158,10 +158,6 @@ function loadConfig(argv = process.argv.slice(2)) {
       deviceFile: cli.authDeviceFile ?? process.env.RT_AUTH_DEVICE_FILE
         ?? path.join(root, 'data', 'devices.json'),
       httpTimeoutMs: num(cli.authHttpTimeout, 10_000),
-      // 死设备驱逐：离线且 lastSeenAt 超过这么多天的注册记录自动删除（0 = 关闭）。
-      // 驱逐自愈（设备回来重连即重新登记、密钥恢复，见 auth.js purgeIdleDevices），
-      // 默认 30 天——手机列表里"三个月前登录过一次就再没上过线"的残留不再永久堆积。
-      deviceTtlDays: num(cli.deviceTtlDays ?? process.env.RT_DEVICE_TTL_DAYS, 30),
     },
   };
 }
@@ -210,28 +206,6 @@ function createServer(userConfig = {}) {
   let nextPeerId = 1;
 
   const stats = { connections: 0, messagesIn: 0, forwarded: 0, offline: 0, rejected: 0 };
-
-  // ── 死设备驱逐（自动探活的长期半边）───────────────────────────────────
-  // 在线与否的**实时**半边由 WS 心跳承担（下方 isAlive 30s 巡检，死连接被
-  // terminate，/my/devices 的 online 字段随之归 false）。这里补的是**长期**半边：
-  // 登记后再也不上线的记录（换机、卸载、测试残留）会永久堆积，手机列表越拉越长。
-  // 判定极简：不在 pcs 表（离线）且 lastSeenAt 超过 RT_DEVICE_TTL_DAYS 天 → 删除。
-  // 启动即扫一次 + 每 6h 一轮；在线设备绝不误踢（pcs 表是判定注入）。
-  const sweepIdleDevices = () => {
-    const ttlMs = config.auth.deviceTtlDays * 86_400_000;
-    if (ttlMs <= 0) return;
-    try {
-      auth.purgeIdleDevices(ttlMs, (clientId) => pcs.has(clientId));
-    } catch (e) {
-      logger.warn('死设备驱逐执行失败', { error: e.message });
-    }
-  };
-  let deviceSweepTimer = null;
-  if (config.auth.enabled && config.auth.deviceTtlDays > 0) {
-    sweepIdleDevices();
-    deviceSweepTimer = setInterval(sweepIdleDevices, 6 * 3600 * 1000);
-    deviceSweepTimer.unref?.();
-  }
 
   // ================= HTTP 层（健康检查 + 测试接口） =================
   const httpServer = http.createServer((req, res) => {
@@ -403,14 +377,18 @@ function createServer(userConfig = {}) {
     if (url.pathname === '/my/devices') {
       const me = auth.verifyDeviceToken(bearerOf(req));
       if (!me) return send(401, { ok: false, error: 'unauthorized' });
-      const list = auth.listDevicesByUser(me.sub).map((d) => ({
-        ...publicDevice(d),
-        // 会话密钥只随"属主自己的设备列表"下发——这是手机端能解密/加密的唯一凭据。
-        // 上面 listDevicesByUser 已按令牌 sub 过滤，所以这里不会外泄给他人。
-        sessionKey: d.sessionKey,
-        online: pcs.has(d.clientId),
-        connectedAt: peers.get(pcs.get(d.clientId))?.connectedAt || null,
-      }));
+      // 只返回当前在线的设备——离线的不再列在手机端，没有"空挂几小时才消失"
+      // 的模糊状态。设备一关掉 serve，下一次 /my/devices 就看不到它；重新
+      // 启 serve 会 register 并再次出现。跨用户不可见由 listDevicesByUser 保证。
+      const list = auth.listDevicesByUser(me.sub)
+        .filter((d) => pcs.has(d.clientId))
+        .map((d) => ({
+          ...publicDevice(d),
+          // 会话密钥只随属主自己的设备列表下发——手机端解密/加密的唯一入口。
+          sessionKey: d.sessionKey,
+          online: true,
+          connectedAt: peers.get(pcs.get(d.clientId))?.connectedAt || null,
+        }));
       return send(200, { ok: true, userId: me.sub, count: list.length, devices: list });
     }
 
@@ -820,7 +798,6 @@ function createServer(userConfig = {}) {
   /** 优雅关闭：清理定时器、断开所有连接、关闭 HTTP 与日志流。 */
   async function close() {
     clearInterval(heartbeat);
-    clearInterval(deviceSweepTimer);
     logger.info('shutting down, disconnecting all peers', { peers: wss.clients.size });
     for (const ws of wss.clients) {
       try { ws.close(1001, 'server shutting down'); } catch { /* ignore */ }

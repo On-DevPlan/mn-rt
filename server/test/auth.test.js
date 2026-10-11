@@ -354,11 +354,13 @@ test('GET /auth/oidc/callback 明确拒绝而不是静默 404（服务端不代�
   }
 });
 
-test('/my/devices 响应回带属主，CLI auth status 才知道"服务端认的是谁"', async () => {
+test('/my/devices 只返回在线设备；离线的不列；属主自报；跨用户零可见', async () => {
   const srv = makeAuthedServer('mydev');
-  const { auth } = srv._internal;
+  const { auth, pcs } = srv._internal;
   auth.upsertDevice({ clientId: 'pc-mine', userId: 'alice', deviceName: '书房' });
-  const { token } = auth.issueDeviceToken({ userId: 'alice', clientId: 'pc-mine' });
+  auth.upsertDevice({ clientId: 'pc-bob',  userId: 'bob',   deviceName: 'Bob 机' });
+  const aliceTok = auth.issueDeviceToken({ userId: 'alice', clientId: 'pc-mine' }).token;
+  const bobTok   = auth.issueDeviceToken({ userId: 'bob',   clientId: 'pc-bob'  }).token;
 
   const { port } = await srv.listen();
   try {
@@ -370,18 +372,33 @@ test('/my/devices 响应回带属主，CLI auth status 才知道"服务端认的
       }).on('error', reject);
     });
 
-    const mine = await call({ Authorization: `Bearer ${token}` });
+    // 没在线：列表为空（设备登记了但不"当前在线"，手机端看不到）
+    let mine = await call({ Authorization: `Bearer ${aliceTok}` });
     assert.equal(mine.status, 200);
     assert.equal(mine.json.userId, 'alice', '响应必须自报属主');
+    assert.equal(mine.json.devices.length, 0, '离线设备不应出现在列表里');
+    assert.equal(mine.json.count, 0);
+
+    // 标记 alice 的设备为在线（WS 心跳填的 pcs 表）
+    pcs.set('pc-mine', { readyState: 1, send() {} });
+    mine = await call({ Authorization: `Bearer ${aliceTok}` });
+    assert.equal(mine.status, 200);
     assert.equal(mine.json.devices.length, 1);
+    assert.equal(mine.json.devices[0].clientId, 'pc-mine');
+    assert.equal(mine.json.devices[0].online, true, '能列出来的一律在线（不再有混合态）');
     assert.ok(mine.json.devices[0].sessionKey, '属主必须拿得到自己设备的会话密钥');
 
-    // 别人的设备令牌，一个字都看不到
-    const bobTok = auth.issueDeviceToken({ userId: 'bob', clientId: 'pc-bob' }).token;
+    // 别人的设备令牌：一个字都看不到（跨用户不可见）
     const theirs = await call({ Authorization: `Bearer ${bobTok}` });
     assert.equal(theirs.json.count, 0, '跨用户零可见');
     assert.ok(!JSON.stringify(theirs.json).includes(mine.json.devices[0].sessionKey),
       '他人响应里不得出现我的会话密钥');
+
+    // bob 的设备也上线的，结果不含字段也没有 alice 的密钥泄漏
+    pcs.set('pc-bob', { readyState: 1, send() {} });
+    const theirsOnline = await call({ Authorization: `Bearer ${bobTok}` });
+    assert.equal(theirsOnline.json.devices.length, 1);
+    assert.equal(theirsOnline.json.devices[0].clientId, 'pc-bob');
 
     const anon = await call({});
     assert.equal(anon.status, 401, '无令牌必须拒');
@@ -537,56 +554,4 @@ test('/auth/oidc/config 的公开视图不含任何密钥', () => {
     assert.ok(!json.includes(banned), `公开配置里不得出现 ${banned}`);
   }
   assert.ok(!('client_secret' in cfg));
-});
-
-// ==================== 死设备驱逐 ====================
-
-test('purgeIdleDevices：在线绝不踢、离线超期才踢、删除要落盘', () => {
-  const file = tmpFile('dev-purge');
-  const DAY = 86_400_000;
-  const iso = (daysAgo) => new Date(Date.now() - daysAgo * DAY).toISOString();
-  const make = () => new AuthHub({
-    enabled: true, issuer: 'http://idp.test:8082', clientId: 'mn-rt',
-    jwtSecret: 'test-secret-do-not-use-in-prod', deviceFile: file,
-    logger: { warn() {}, info() {} },
-  });
-  const auth = make();
-  auth.devices.set('pc-fresh',  { clientId: 'pc-fresh',  userId: '5', lastSeenAt: iso(1),  registeredAt: iso(2),  sessionKey: 'k1' });
-  auth.devices.set('pc-stale',  { clientId: 'pc-stale',  userId: '5', lastSeenAt: iso(40), registeredAt: iso(41), sessionKey: 'k2' });
-  // 时间戳损坏的记录无法证明自己活着：按死处理
-  auth.devices.set('pc-nostamp', { clientId: 'pc-nostamp', userId: '5', sessionKey: 'k3' });
-
-  // 第一轮：pc-stale 声明在线——在线的一票否决，哪怕它 40 天没刷新 lastSeenAt
-  let evicted = auth.purgeIdleDevices(30 * DAY, (id) => id === 'pc-stale');
-  assert.deepEqual(evicted, ['pc-nostamp'], '在线设备绝不驱逐；无时间戳的按死处理');
-  assert.ok(auth.devices.has('pc-fresh') && auth.devices.has('pc-stale'));
-
-  // 第二轮：都不在线；nostamp 第一轮已走，这里只剩 stale
-  evicted = auth.purgeIdleDevices(30 * DAY);
-  assert.deepEqual(evicted, ['pc-stale']);
-  assert.ok(auth.devices.has('pc-fresh'), '新鲜设备必须留下');
-
-  // 落盘核验：重开实例读同一份文件，被踢的不得复活
-  const again = make();
-  assert.ok(!again.devices.has('pc-stale') && !again.devices.has('pc-nostamp'));
-  assert.ok(again.devices.has('pc-fresh'));
-
-  // 开关关闭（ttl <= 0）：什么都不做
-  assert.deepEqual(again.purgeIdleDevices(0), []);
-  assert.equal(again.devices.size, 1);
-});
-
-test('RT_DEVICE_TTL_DAYS：默认 30 天，0 = 关闭，非法值回落默认', () => {
-  const { loadConfig } = require('../src/server');
-  const withEnv = (v, fn) => {
-    const prev = process.env.RT_DEVICE_TTL_DAYS;
-    if (v === undefined) delete process.env.RT_DEVICE_TTL_DAYS; else process.env.RT_DEVICE_TTL_DAYS = v;
-    try { return fn(); } finally {
-      if (prev === undefined) delete process.env.RT_DEVICE_TTL_DAYS; else process.env.RT_DEVICE_TTL_DAYS = prev;
-    }
-  };
-  assert.equal(withEnv(undefined, () => loadConfig(['--port', '0']).auth.deviceTtlDays), 30);
-  assert.equal(withEnv('0', () => loadConfig(['--port', '0']).auth.deviceTtlDays), 0);
-  assert.equal(withEnv('7', () => loadConfig(['--port', '0']).auth.deviceTtlDays), 7);
-  assert.equal(withEnv('abc', () => loadConfig(['--port', '0']).auth.deviceTtlDays), 30);
 });
