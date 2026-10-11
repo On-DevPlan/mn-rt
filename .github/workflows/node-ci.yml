@@ -60,12 +60,14 @@ jobs:
       # 不是保护，是安慰剂——尤其是"跨属主不得回显会话密钥"这一类，
       # 回归时表现是完全静默的（接口照答、服务照起）。
       #
-      # 写成显式 glob 而不是 `node --test test/`：Node 20 认目录、Node 22 不认，
-      # 后者会把它当模块去 require，报 "Cannot find module .../server/test"。
-      # 矩阵里两腿跑同一条命令时，这种差异会只在一侧红，很容易被误读成偶发。
-      # 引号也要：交给 node 自己展开通配，不依赖各 runner 的 shell 行为。
+      # 写成**不加引号**的 glob，让 bash 先展成真实文件名再交给 node。
+      # 两个写法各死在一边：`test/`（目录）Node 20 认、Node 22 不认，后者把它当模块
+      # require，报 "Cannot find module .../server/test"；'test/*.test.js'（带引号）
+      # 反过来是 Node 20 不支持在 --test 里做通配，报 "Could not find ..."。
+      # 只有交给 shell 展开才是两版都成立的写法——所以引号必须去掉。
       - name: 统一登录与属主单元测试
-        run: node --test 'test/*.test.js'
+        shell: bash
+        run: node --test test/*.test.js
 
       - name: 启动冒烟测试（/health、/stats、/push 空文本拒绝）
         run: |
