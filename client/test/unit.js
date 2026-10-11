@@ -586,6 +586,87 @@ test('align：commit 后发 ACK 信封（方向 c2p，手机可解）', () => {
   assert.strictEqual(plain.applied_seq, 1);
 });
 
+// ---- 快捷键指令（v0.5.4+）----
+
+/** 以手机身份密封一条快捷键指令（与 sealedSync 同链路，明文带 hotkey 字段）。 */
+function sealedHotkey(align, keys, seq, sid = 's1', phoneId = 'phone-e2e') {
+  const { seal, buildAad } = require('../lib/rt-crypto');
+  const plain = { hotkey: keys, ts: 0, phoneId };
+  return JSON.stringify(
+    seal(align.keyPhoneToPc, buildAad(align.room, 'p2c', seq), plain, { sid, seq }),
+  );
+}
+
+test('align：hotkey 信封 → hotkey op，不进 diff 状态机', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  assert.strictEqual(align.handleIncoming(sealedHotkey(align, ['win', 'r'], 1)), 'envelope');
+  // 单条 op：hotkey。没有 type / backspace / commit——它是无状态事件
+  assert.deepStrictEqual(ops.map((o) => o.op), ['hotkey']);
+  assert.strictEqual(ops[0].key, 'r');
+  assert.deepStrictEqual(ops[0].modifiers, ['win']);
+  assert.strictEqual(ops[0].seq, 1);
+  assert.strictEqual(align.phoneId, 'phone-e2e');
+  // 不碰快照状态：desiredText 仍为 null，mirror 仍为空
+  assert.strictEqual(align.desiredText, null);
+  assert.strictEqual(align.mirror, '');
+  assert.strictEqual(align.busy, false);
+});
+
+test('align：hotkey 重复 seq 不去重（事件语义，重复点击应重复生效）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedHotkey(align, ['win', 'r'], 1));
+  align.handleIncoming(sealedHotkey(align, ['win', 'r'], 1));
+  assert.strictEqual(ops.length, 2);
+  assert.deepStrictEqual(ops.map((o) => o.op), ['hotkey', 'hotkey']);
+});
+
+test('align：hotkey 与 text 快照互不干扰', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  // 先 hotkey，再文字快照：文字走正常 diff 流程
+  align.handleIncoming(sealedHotkey(align, ['ctrl', 'shift', 't'], 1));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['hotkey']);
+  ops.length = 0;
+  align.handleIncoming(sealedSync(align, '你好', 2));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(ops[0].text, '你好');
+  // 再 hotkey：不与快照状态打架（desiredSeq 已是 2，hotkey seq=1 也会被放行）
+  ops.length = 0;
+  align.handleIncoming(sealedHotkey(align, ['f5'], 1));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['hotkey']);
+  assert.strictEqual(ops[0].key, 'f5');
+  assert.deepStrictEqual(ops[0].modifiers, []);
+  // 快照状态不被 hotkey 污染：下一次快照 diff 仍从 mirror 出发
+  align.commitApplied(2, '你好');
+  ops.length = 0;
+  align.handleIncoming(sealedSync(align, '你好!', 3));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['type', 'commit']);
+  assert.strictEqual(ops[0].text, '!');
+});
+
+test('align：hotkey 受理即回 ACK（无按键计划也推进手机端确认）', () => {
+  const { align, ops, acks } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedHotkey(align, ['win', 'v'], 7));
+  assert.strictEqual(acks.length, 1);
+  const plain = rtCrypto.open(
+    align.keyPcToPhone,
+    rtCrypto.buildAad(align.room, 'c2p', acks[0].seq),
+    acks[0],
+  );
+  assert.strictEqual(plain.applied_seq, 7);
+});
+
+test('align：hotkey 空数组 / 非数组字段 → 按旧规则处理（向后兼容）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  // 空数组不算 hotkey 指令，也没有 text → duplicate（老 PC 行为不变）
+  const { seal, buildAad } = require('../lib/rt-crypto');
+  const env = JSON.stringify(seal(
+    align.keyPhoneToPc, buildAad(align.room, 'p2c', 1),
+    { hotkey: [], ts: 0, phoneId: 'p' }, { sid: 's1', seq: 1 },
+  ));
+  assert.strictEqual(align.handleIncoming(env), 'duplicate');
+  assert.deepStrictEqual(ops, []);
+});
+
 test('align：发送模式 Enter 提交后 mirror 归零（目标框已随消息清空）', () => {
   const { align, ops } = newTestAlign(vectors.input_key);
   align.handleIncoming(sealedSync(align, '你好\n', 1, 's1', 'phone-e2e', 'enter'));

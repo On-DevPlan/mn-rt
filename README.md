@@ -61,6 +61,12 @@ npx nx-rt serve --key MYKEY123                    # 两端用同一个 key
 - **对齐**：手机每次输入框变更上传全文快照（AES-256-GCM，随机 nonce，
   AAD 绑定 `RT1|<派生标签>|方向|seq`），PC diff（grapheme 级 + 后缀优化）→ 注入 → 累积 ACK
   （经服务端按 phoneId 反向路由）；手机能解开 ACK = 端到端闭环成立。
+- **快捷键指令（v0.5.4+）**：信封明文可携带 `hotkey` 数组（末位主键、其余修饰键，
+  如 `{"hotkey":["win","r"],...}` = Win+R）。它与全文快照同链路同密钥，但走
+  「事件」语义：不进 diff 状态机（不更新 mirror/desiredSeq）、**不受 seq 去重约束**
+  （重复点击重复生效）、受理即回 ACK。老版本 PC 收到无 `text` 的明文按 duplicate
+  丢弃，即快捷键功能对旧 PC 静默无效——向后兼容。合法键名见
+  `rust/input-agent/src/main.rs` 的 `parse_key_name` / `parse_modifier_name`。
 - **防重放**：seq 单调去重；手机重启换会话号自动重置 seq 域；明文流量在 align 模式下一律拒绝。
 
 ### 安全边界（务必阅读）

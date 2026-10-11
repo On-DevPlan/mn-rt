@@ -148,14 +148,6 @@ class RtAlignSession extends EventEmitter {
   _handleEnvelope(envelope) {
     const seq = Number(envelope.seq) || 0;
     const sid = String(envelope.sid ?? '');
-    // 手机端重启会换 sid 且 seq 归零：新会话无条件接受
-    if (sid !== this.lastSyncSid) {
-      this.logger?.info('input session detected', { sid, prev: this.lastSyncSid });
-      this.lastSyncSid = sid;
-      this.desiredSeq = 0;
-    } else if (seq <= this.desiredSeq && this.desiredText !== null) {
-      return 'duplicate';
-    }
 
     let plain;
     try {
@@ -167,6 +159,30 @@ class RtAlignSession extends EventEmitter {
       this.emit('decrypt-error', { seq });
       return 'duplicate';
     }
+
+    // 快捷键指令（v0.5.4+）：hotkey 是「事件」而非「快照」，在 seq 去重
+    // 之前处理——重复点击应该重复生效，且不得碰快照状态机（不更新
+    // lastSyncSid / desiredSeq / desiredText，不设 busy、不进 _dispatch）。
+    // 协议：hotkey 数组末位是主键、其余是修饰键（['win','r'] = Win+R）。
+    if (Array.isArray(plain.hotkey) && plain.hotkey.length > 0) {
+      const main = String(plain.hotkey[plain.hotkey.length - 1]);
+      const modifiers = plain.hotkey.slice(0, -1).map(String);
+      this.phoneId = typeof plain.phoneId === 'string' ? plain.phoneId : '';
+      this.stats.envelopesOk += 1;
+      this._sendAck(seq); // 直接回「已受理」：无按键计划需要 commit
+      this.emit('op', { op: 'hotkey', key: main, modifiers, seq });
+      return 'envelope';
+    }
+
+    // 手机端重启会换 sid 且 seq 归零：新会话无条件接受
+    if (sid !== this.lastSyncSid) {
+      this.logger?.info('input session detected', { sid, prev: this.lastSyncSid });
+      this.lastSyncSid = sid;
+      this.desiredSeq = 0;
+    } else if (seq <= this.desiredSeq && this.desiredText !== null) {
+      return 'duplicate';
+    }
+
     if (typeof plain.text !== 'string') return 'duplicate';
 
     this.stats.envelopesOk += 1;

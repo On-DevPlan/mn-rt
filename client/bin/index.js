@@ -420,7 +420,8 @@ async function cmdServe(cfg) {
 
   // ---- 消息队列：串行消费，逐条注入 ----
   // serve 明文模式 item = {text, clientId}；对齐模式 item =
-  //   {op:'type', text, seq} | {op:'backspace', count, seq} | {op:'commit', seq, text}
+  //   {op:'type', text, seq} | {op:'backspace', count, seq}
+  //   | {op:'hotkey', key, modifiers, seq} | {op:'commit', seq, text}
   const queue = new MessageQueue({
     maxSize: cfg.maxQueueSize,
     logger,
@@ -436,6 +437,27 @@ async function cmdServe(cfg) {
           align?.commitFailed(item.seq);
         } else {
           align?.commitApplied(item.seq, item.text);
+        }
+        return;
+      }
+
+      // hotkey：快捷键指令（对齐模式 v0.5.4+）。
+      // 无 mirror 推进语义：成功与否都不影响后续快照 diff，失败不重试
+      //（快捷键可能已实际触发，重发有误触风险，宁少勿多）。
+      if (item.op === 'hotkey') {
+        const combo = [...(item.modifiers ?? []), item.key].join('+');
+        try {
+          const res = await agent.hotkey(item.key, item.modifiers ?? []);
+          if (res?.ok) {
+            logger.info('快捷键完成', { combo, queueWaitMs });
+            store.append({ status: 'hotkey_sent', combo, source: meta.source, seq: item.seq });
+          } else {
+            logger.error('快捷键失败', { combo, msg: res?.msg });
+            store.append({ status: 'hotkey_failed', combo, errorMsg: res?.msg ?? 'unknown', source: meta.source, seq: item.seq });
+          }
+        } catch (e) {
+          logger.error('快捷键异常', { combo, error: e.message });
+          store.append({ status: 'hotkey_failed', combo, errorMsg: e.message, source: meta.source, seq: item.seq });
         }
         return;
       }

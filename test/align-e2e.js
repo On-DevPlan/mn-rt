@@ -105,6 +105,18 @@ class PhoneSim {
     this.ws.send(JSON.stringify({ clientId: PC_CLIENT_ID, text: JSON.stringify(envelope) }));
   }
 
+  /** 快捷键指令（v0.5.4+）：与 syncText 同链路，明文带 hotkey 字段。 */
+  syncHotkey(keys) {
+    this.seq += 1;
+    const envelope = rtCrypto.seal(
+      this.derived.keyPhoneToPc,
+      rtCrypto.buildAad(this.derived.room, 'p2c', this.seq),
+      { hotkey: keys, ts: Date.now(), phoneId: this.phoneId },
+      { sid: this.sid, seq: this.seq },
+    );
+    this.ws.send(JSON.stringify({ clientId: PC_CLIENT_ID, text: JSON.stringify(envelope) }));
+  }
+
   /** 等 PC 的 E2E ACK 并解密，返回 applied_seq。 */
   async readAppliedSeq(lastSeen) {
     const frame = await this.waitFor(
@@ -145,6 +157,7 @@ async function startPcSide(logger) {
       const op = pending.shift();
       if (op.op === 'type') applied.push({ op: 'type', text: op.text });
       else if (op.op === 'backspace') applied.push({ op: 'backspace', count: op.count });
+      else if (op.op === 'hotkey') applied.push({ op: 'hotkey', key: op.key, modifiers: op.modifiers });
       else if (op.op === 'commit') {
         align.commitApplied(op.seq, op.text);
         continue;
@@ -239,6 +252,34 @@ async function mainFlow() {
   assert.deepStrictEqual(pc.applied, [], 'wrong-key envelope must not inject');
   assert.ok(pc.align.stats.envelopesBad > before, 'decrypt failure counted');
   console.log('✓ 场景 7 错误 key 信封被丢弃');
+
+  // ---- 场景 7b：快捷键指令（事件语义，不进 diff 状态机）----
+  pc.applied.length = 0;
+  const mirrorBefore = pc.align.mirror;
+  const desiredBefore = pc.align.desiredText;
+  phone.syncHotkey(['win', 'r']);
+  await waitFor(() => pc.applied.some((o) => o.op === 'hotkey'), 8000, 'hotkey op 到达');
+  assert.deepStrictEqual(
+    pc.applied.filter((o) => o.op === 'hotkey'),
+    [{ op: 'hotkey', key: 'r', modifiers: ['win'] }],
+    'hotkey op 应解出主键 r + 修饰键 win',
+  );
+  // 不碰快照状态机：mirror / desiredText 保持原值
+  assert.strictEqual(pc.align.mirror, mirrorBefore);
+  assert.strictEqual(pc.align.desiredText, desiredBefore);
+  // ACK 闭环：手机端能解出 applied_seq
+  await phone.readAppliedSeq(ack);
+  console.log('✓ 场景 7b 快捷键指令（hotkey op + ACK 闭环）');
+
+  // ---- 场景 7c：hotkey 后紧跟文字快照，互不干扰 ----
+  pc.applied.length = 0;
+  phone.syncText('回归');
+  await waitFor(() => pc.align.mirror === '回归', 8000, 'hotkey 后快照仍收敛');
+  assert.deepStrictEqual(
+    pc.applied.filter((o) => o.op === 'type'),
+    [{ op: 'type', text: '回归' }],
+  );
+  console.log('✓ 场景 7c hotkey 与文字快照互不干扰');
 
   phone.close();
   impostor.close();
