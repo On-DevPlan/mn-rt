@@ -538,3 +538,55 @@ test('/auth/oidc/config 的公开视图不含任何密钥', () => {
   }
   assert.ok(!('client_secret' in cfg));
 });
+
+// ==================== 死设备驱逐 ====================
+
+test('purgeIdleDevices：在线绝不踢、离线超期才踢、删除要落盘', () => {
+  const file = tmpFile('dev-purge');
+  const DAY = 86_400_000;
+  const iso = (daysAgo) => new Date(Date.now() - daysAgo * DAY).toISOString();
+  const make = () => new AuthHub({
+    enabled: true, issuer: 'http://idp.test:8082', clientId: 'mn-rt',
+    jwtSecret: 'test-secret-do-not-use-in-prod', deviceFile: file,
+    logger: { warn() {}, info() {} },
+  });
+  const auth = make();
+  auth.devices.set('pc-fresh',  { clientId: 'pc-fresh',  userId: '5', lastSeenAt: iso(1),  registeredAt: iso(2),  sessionKey: 'k1' });
+  auth.devices.set('pc-stale',  { clientId: 'pc-stale',  userId: '5', lastSeenAt: iso(40), registeredAt: iso(41), sessionKey: 'k2' });
+  // 时间戳损坏的记录无法证明自己活着：按死处理
+  auth.devices.set('pc-nostamp', { clientId: 'pc-nostamp', userId: '5', sessionKey: 'k3' });
+
+  // 第一轮：pc-stale 声明在线——在线的一票否决，哪怕它 40 天没刷新 lastSeenAt
+  let evicted = auth.purgeIdleDevices(30 * DAY, (id) => id === 'pc-stale');
+  assert.deepEqual(evicted, ['pc-nostamp'], '在线设备绝不驱逐；无时间戳的按死处理');
+  assert.ok(auth.devices.has('pc-fresh') && auth.devices.has('pc-stale'));
+
+  // 第二轮：都不在线；nostamp 第一轮已走，这里只剩 stale
+  evicted = auth.purgeIdleDevices(30 * DAY);
+  assert.deepEqual(evicted, ['pc-stale']);
+  assert.ok(auth.devices.has('pc-fresh'), '新鲜设备必须留下');
+
+  // 落盘核验：重开实例读同一份文件，被踢的不得复活
+  const again = make();
+  assert.ok(!again.devices.has('pc-stale') && !again.devices.has('pc-nostamp'));
+  assert.ok(again.devices.has('pc-fresh'));
+
+  // 开关关闭（ttl <= 0）：什么都不做
+  assert.deepEqual(again.purgeIdleDevices(0), []);
+  assert.equal(again.devices.size, 1);
+});
+
+test('RT_DEVICE_TTL_DAYS：默认 30 天，0 = 关闭，非法值回落默认', () => {
+  const { loadConfig } = require('../src/server');
+  const withEnv = (v, fn) => {
+    const prev = process.env.RT_DEVICE_TTL_DAYS;
+    if (v === undefined) delete process.env.RT_DEVICE_TTL_DAYS; else process.env.RT_DEVICE_TTL_DAYS = v;
+    try { return fn(); } finally {
+      if (prev === undefined) delete process.env.RT_DEVICE_TTL_DAYS; else process.env.RT_DEVICE_TTL_DAYS = prev;
+    }
+  };
+  assert.equal(withEnv(undefined, () => loadConfig(['--port', '0']).auth.deviceTtlDays), 30);
+  assert.equal(withEnv('0', () => loadConfig(['--port', '0']).auth.deviceTtlDays), 0);
+  assert.equal(withEnv('7', () => loadConfig(['--port', '0']).auth.deviceTtlDays), 7);
+  assert.equal(withEnv('abc', () => loadConfig(['--port', '0']).auth.deviceTtlDays), 30);
+});

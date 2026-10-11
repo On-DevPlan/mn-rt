@@ -40,6 +40,10 @@ gh secret set RT_AUTH_ENABLED -b "1"
 gh secret set RT_AUTH_JWT_SECRET -b "$(openssl rand -hex 32)"
 # issuer 默认 http://47.110.80.47:8082、client 默认 mn-rt，换环境才需要配
 gh secret set RT_AUTH_ISSUER -b "http://47.110.80.47:8082"
+
+# 死设备驱逐：离线超过 N 天的注册记录自动删除（默认 30，0 = 关闭）。
+# 在线设备绝不误踢；设备回来重连即自愈（密钥随 register 帧恢复）。
+# gh secret set RT_DEVICE_TTL_DAYS -b "30"
 ```
 
 > 手机端 / PC 端在服务器设了 `RT_TOKEN` 后也须携带同一 token（PC：`--token`）。
