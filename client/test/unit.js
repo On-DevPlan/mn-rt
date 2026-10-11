@@ -681,6 +681,7 @@ function withTempHome(fn) {
   // 测试期间必须把它们也指进临时区，否则会拷到真机数据
   process.env.APPDATA = path.join(dir, 'AppData', 'Roaming');
   process.env.USERPROFILE = path.join(dir, 'home');
+  process.env.HOME = path.join(dir, 'home'); // posix 的 os.homedir() 读 HOME
   try {
     fn(dir);
   } finally {
@@ -778,8 +779,9 @@ test('migrateLegacyConfigDir：拷贝 client-id/config.json，logs/data 不动',
   withTempHome((dir) => {
     const fs2 = require('fs');
     const p = require('path');
-    // withTempHome 已把 APPDATA 指进临时区：这里就是 migrate 会扫到的旧目录
-    const oldDir = p.join(process.env.APPDATA, 'remotetype');
+    // withTempHome 已把 HOME/USERPROFILE 指进临时区：os.homedir() 即临时 home，
+    // 这里就是 legacyConfigDirs 在所有平台都会扫描的旧目录
+    const oldDir = path.join(os.homedir(), '.remotetype');
     fs2.mkdirSync(p.join(oldDir, 'logs'), { recursive: true });
     fs2.writeFileSync(p.join(oldDir, 'client-id'), 'pc-old-id');
     fs2.writeFileSync(p.join(oldDir, 'config.json'), '{"url":"ws://old"}');
@@ -797,7 +799,7 @@ test('migrateLegacyConfigDir：新目录已存在则不动', () => {
   withTempHome((dir) => {
     const fs2 = require('fs');
     const p = require('path');
-    const oldDir = p.join(process.env.APPDATA, 'remotetype');
+    const oldDir = path.join(os.homedir(), '.remotetype');
     fs2.mkdirSync(oldDir, { recursive: true });
     fs2.writeFileSync(p.join(oldDir, 'client-id'), 'pc-old');
     const newDir = p.join(dir, '.nx-rt');
