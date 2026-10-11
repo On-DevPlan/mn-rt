@@ -390,6 +390,124 @@ test('/my/devices 响应回带属主，CLI auth status 才知道"服务端认的
   }
 });
 
+/**
+ * 起一个最小假认证中心：发现文档 + token 端点 + userinfo。
+ *
+ * 为什么打桩而不是直连线上认证中心：线上那条真链路需要一个能登录的账号，
+ * 而 CI 里不该存生产口令。这里覆盖的是**本服务这一段实现的正确性**
+ * （表单字段名、不带 secret、用完即弃、拿 sub 当属主）；
+ * 与真实认证中心的互操作由 .tool/chaincheck 手工验收（需一次真实登录）。
+ * 两者是不同的问题，别用其中一个的通过去宣称另一个也通过了。
+ */
+function startFakeIdp({ expectVerifier } = {}) {
+  const hits = { token: 0, userinfo: 0, lastTokenForm: null, lastAuth: null };
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const send = (code, obj) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(obj));
+    };
+    if (u.pathname === '/.well-known/openid-configuration') {
+      const base = `http://127.0.0.1:${srv.address().port}`;
+      return send(200, {
+        issuer: base,
+        authorization_endpoint: `${base}/oauth2/auth`,
+        token_endpoint: `${base}/oauth2/token`,
+        userinfo_endpoint: `${base}/oauth2/userinfo`,
+      });
+    }
+    if (u.pathname === '/oauth2/token') {
+      hits.token += 1;
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      req.on('end', () => {
+        const form = Object.fromEntries(new URLSearchParams(raw));
+        hits.lastTokenForm = form;
+        if (form.code_verifier !== expectVerifier) return send(400, { error: 'invalid_grant' });
+        send(200, { access_token: 'IDP-AT-1', refresh_token: 'IDP-RT-SECRET', token_type: 'Bearer' });
+      });
+      return undefined;
+    }
+    if (u.pathname === '/oauth2/userinfo') {
+      hits.userinfo += 1;
+      hits.lastAuth = req.headers.authorization || '';
+      if (hits.lastAuth !== 'Bearer IDP-AT-1') return send(401, { error: 'invalid_token' });
+      return send(200, { sub: 'sub-777', email: 'p@x.io', name: '跑批', preferred_username: 'pao' });
+    }
+    return send(404, { error: 'not_found' });
+  });
+  srv.listen(0, '127.0.0.1');
+  return new Promise((resolve) => srv.once('listening', () => resolve({
+    srv, hits,
+    issuer: `http://127.0.0.1:${srv.address().port}`,
+    close: () => new Promise((r) => srv.close(r)),
+  })));
+}
+
+test('POST /auth/oidc/callback：授权码+verifier 换到身份并签发设备令牌', async () => {
+  const verifier = 'a-test-verifier-value-0123456789abcdef';
+  const idp = await startFakeIdp({ expectVerifier: verifier });
+  const srv = createServer({
+    port: 0, logLevel: 'silent',
+    logDir: tmpFile('l-cb'), recordFile: tmpFile('r-cb'), token: null,
+    auth: {
+      enabled: true, issuer: idp.issuer, clientId: 'mn-rt',
+      redirectUri: 'http://127.0.0.1:8790/callback',
+      jwtSecret: 'cb-test-secret', deviceFile: tmpFile('d-cb'), httpTimeoutMs: 4000,
+    },
+  });
+  const { port } = await srv.listen();
+  const post = (path, body, headers = {}) => new Promise((resolve, reject) => {
+    const req = http.request({
+      method: 'POST', host: '127.0.0.1', port, path,
+      headers: { 'Content-Type': 'application/json', ...headers },
+    }, (res) => {
+      let raw = '';
+      res.on('data', (c) => { raw += c; });
+      res.on('end', () => resolve({ status: res.statusCode, raw, json: JSON.parse(raw || '{}') }));
+    });
+    req.on('error', reject);
+    req.end(JSON.stringify(body));
+  });
+  try {
+    const ok = await post('/auth/oidc/callback', {
+      code: 'CODE-1', codeVerifier: verifier, redirectUri: 'http://127.0.0.1:8790/callback',
+      clientId: 'pc-cb', deviceName: '回调机',
+    });
+    assert.equal(ok.status, 200, ok.raw);
+    assert.equal(ok.json.userId, 'sub-777', '属主必须是认证中心断言的 sub');
+    assert.ok(ok.json.token, '回设备令牌');
+    assert.ok(ok.json.sessionKey, '回会话密钥');
+
+    // 表单必须带 verifier 且**不带任何 secret**：这是公共客户端的契约
+    assert.equal(idp.hits.lastTokenForm.code_verifier, verifier);
+    assert.equal(idp.hits.lastTokenForm.client_id, 'mn-rt');
+    assert.ok(!('client_secret' in idp.hits.lastTokenForm), '公共客户端不得发 client_secret');
+    assert.equal(idp.hits.userinfo, 1);
+
+    // 关键隐私断言：认证中心的 refresh_token 绝不外流到响应里
+    const body = JSON.stringify(ok.json);
+    assert.ok(!body.includes('IDP-RT-SECRET'), 'refresh_token 不得出现在任何响应/存储里');
+    assert.ok(!body.includes('IDP-AT-1'), 'access_token 也不得回带给客户端');
+
+    // 换错 verifier 必须失败，且不能因此签出任何令牌
+    const bad = await post('/auth/oidc/callback', {
+      code: 'CODE-2', codeVerifier: 'WRONG', redirectUri: 'http://127.0.0.1:8790/callback',
+      clientId: 'pc-cb',
+    });
+    assert.equal(bad.status, 401, `verifier 不匹配必须 401，实到 ${bad.status}`);
+    assert.ok(!bad.json.token, '失败路径不得发令牌');
+
+    // 注册表落盘里也不能存认证中心的凭据
+    const persisted = JSON.stringify(srv._internal.auth.devices);
+    assert.ok(!persisted.includes('IDP-RT-SECRET') && !persisted.includes('IDP-AT-1'),
+      '设备注册表不得存认证中心 token');
+  } finally {
+    await srv.close();
+    await idp.close();
+  }
+});
+
 test('/auth/oidc/config 的公开视图不含任何密钥', () => {
   const srv = makeAuthedServer('cfg');
   const cfg = srv._internal.auth.publicConfig();
