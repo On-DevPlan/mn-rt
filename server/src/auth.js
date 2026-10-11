@@ -30,8 +30,15 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-/** 设备令牌有效期（秒）。30 天，与业务侧惯例一致；到期 CLI 重新 auth login。 */
-const DEVICE_TOKEN_TTL_SEC = 30 * 24 * 3600;
+/**
+ * 设备令牌有效期（秒）。365 天。
+ *
+ * 这里刻意比业务侧惯例长得多：本服务有**独立的用户体系**（自己的设备注册表
+ * + 自签令牌），统一登录只是首次认证的快速入口。令牌是 HS256 + `jti` 吊销名单，
+ * 可撤销性不依赖短有效期，所以长度只影响"用户多久被强迫开一次浏览器"——
+ * 对一台自己天天用的电脑，30 天一次的重登录是纯打扰。到期 CLI 重新 auth login。
+ */
+const DEVICE_TOKEN_TTL_SEC = 365 * 24 * 3600;
 
 function b64url(buf) {
   return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
