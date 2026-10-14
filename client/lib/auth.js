@@ -246,6 +246,28 @@ async function verifyExchange({ serverHttp, accessToken, clientId, deviceName })
 }
 
 /**
+ * 组 authorize 地址。
+ *
+ * `promptLogin=true` 时带 OIDC 标准的 `prompt=login`：让认证中心**强制重新登录**，
+ * 供"换个人登录"用。认证中心如果不支持该参数会忽略它，行为退回普通登录，
+ * 所以带着它总是安全的（实测 auth-hub 对未知 prompt 值不报错）。
+ * @param {object} cfg  /auth/oidc/config 的返回（issuer/clientId/scopes/端点）
+ * @param {object} req  createAuthRequest 的返回（state/nonce/authorizeParams）
+ * @param {{promptLogin?: boolean}} [opts]
+ * @returns {string} 完整 authorize URL
+ */
+function buildAuthorizeUrl(cfg, req, { promptLogin = false } = {}) {
+  const authorizeUrl = new URL(cfg.authorizationEndpoint || `${cfg.issuer}/oauth2/auth`);
+  authorizeUrl.searchParams.set('client_id', cfg.clientId);
+  authorizeUrl.searchParams.set('scope', (cfg.scopes || ['openid', 'profile', 'email']).join(' '));
+  authorizeUrl.searchParams.set('state', req.state);
+  authorizeUrl.searchParams.set('nonce', req.nonce);
+  for (const [k, v] of Object.entries(req.authorizeParams)) authorizeUrl.searchParams.set(k, v);
+  if (promptLogin) authorizeUrl.searchParams.set('prompt', 'login');
+  return authorizeUrl.toString();
+}
+
+/**
  * 完整登录一次。
  * @param {object} opts
  * @param {string} opts.serverHttp  服务端 HTTP 基址，如 http://1.94.101.189:8790
@@ -257,6 +279,8 @@ async function verifyExchange({ serverHttp, accessToken, clientId, deviceName })
  *   Promise<{clientId:string, deviceName?:string, retryOnOwnedByOther?:boolean}>} [opts.resolveClientId]
  *   多账号回调：拿到身份后决定用哪个 clientId 登记（详见第 ⑤ 步注释）。
  *   不传时退化为原来的单跳流程，行为逐字节一致。
+ * @param {boolean} [opts.promptLogin] authorize 带 prompt=login，强制认证中心重新登录
+ *   （换人登录用；认证中心不支持时忽略，等于普通登录）
  */
 async function authLogin(opts) {
   const base = (opts.serverHttp || '').replace(/\/+$/, '');
@@ -276,12 +300,7 @@ async function authLogin(opts) {
   const redirectUri = await lb.start();
   const req = createAuthRequest(redirectUri);
 
-  const authorizeUrl = new URL(cfg.authorizationEndpoint || `${cfg.issuer}/oauth2/auth`);
-  authorizeUrl.searchParams.set('client_id', cfg.clientId);
-  authorizeUrl.searchParams.set('scope', (cfg.scopes || ['openid', 'profile', 'email']).join(' '));
-  authorizeUrl.searchParams.set('state', req.state);
-  authorizeUrl.searchParams.set('nonce', req.nonce);
-  for (const [k, v] of Object.entries(req.authorizeParams)) authorizeUrl.searchParams.set(k, v);
+  const authorizeUrl = new URL(buildAuthorizeUrl(cfg, req, { promptLogin: opts.promptLogin === true }));
 
   if (opts.onUrl) opts.onUrl(authorizeUrl.toString());
   if (opts.noOpen) {
@@ -385,6 +404,7 @@ async function authLogin(opts) {
 
 module.exports = {
   authLogin,
+  buildAuthorizeUrl,
   verifyExchange,
   getJson,
   postJson,

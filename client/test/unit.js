@@ -1053,6 +1053,31 @@ test('createAuthRequest：每次调用 verifier/state 都不同（不可预测�
   assert.notStrictEqual(a.state, b.state);
 });
 
+test('buildAuthorizeUrl：prompt=login 只在 --new-account 时带上，state/nonce 逐字透传', () => {
+  const { buildAuthorizeUrl } = require('../lib/auth');
+  const cfg = {
+    issuer: 'http://idp', clientId: 'mn-rt', scopes: ['openid'],
+    authorizationEndpoint: 'http://idp/oauth2/auth',
+  };
+  const req = {
+    state: 'STATE-1', nonce: 'NONCE-1',
+    authorizeParams: {
+      response_type: 'code', redirect_uri: 'http://127.0.0.1:1/callback',
+      code_challenge: 'CHAL', code_challenge_method: 'S256', state: 'STATE-1',
+    },
+  };
+  const plain = new URL(buildAuthorizeUrl(cfg, req));
+  assert.strictEqual(plain.searchParams.get('prompt'), null, '普通登录不该带 prompt');
+  assert.strictEqual(plain.searchParams.get('state'), 'STATE-1');
+  assert.strictEqual(plain.searchParams.get('nonce'), 'NONCE-1');
+  assert.strictEqual(plain.searchParams.get('client_id'), 'mn-rt');
+
+  const forced = new URL(buildAuthorizeUrl(cfg, req, { promptLogin: true }));
+  assert.strictEqual(forced.searchParams.get('prompt'), 'login',
+    '--new-account 靠 prompt=login 让认证中心强制重新登录');
+  assert.strictEqual(forced.searchParams.get('state'), 'STATE-1');
+});
+
 test('openBrowserArgs：Windows 路径不得借道 cmd / start（URL 里的 & 会被切）', () => {
   // 回归用例：早期走 `cmd /c start <url>` 时，cmd.exe 把 & 当命令分隔符，
   // 浏览器只收到 ?client_id=mn-rt 就报 redirect_uri 不在白名单。

@@ -72,6 +72,7 @@ ${C.bold}命令${C.reset}
   ${C.cyan}serve --plain${C.reset}       兼容旧普通模式：只接收整句明文推送（/push 接口、外部脚本）
   ${C.cyan}test${C.reset} "<文本>"        本地测试：直接调用注入引擎，不连公网
   ${C.cyan}auth login${C.reset}          统一登录（弹浏览器）：换回设备令牌 + 会话密钥，之后免配 key
+  ${C.cyan}auth login --new-account${C.reset}  换人登录：强制认证中心重新登录（否则浏览器会话会自动授权给上一个人）
   ${C.cyan}auth list${C.reset}           列出本机已存账号（多人共用同一台电脑时各登各的）
   ${C.cyan}auth switch${C.reset} <账号>   切换当前生效账号（序号/邮箱/用户名/昵称；不带参数给选择器）
   ${C.cyan}auth status${C.reset}         查看当前身份、令牌剩余有效期、本机是否已登记
@@ -302,12 +303,18 @@ async function cmdAuth(cfg, rest, flags = {}) {
         clientId: cfg.clientId,
         deviceName: cfg.deviceName,
         noOpen: cfg.noOpen === true,
+        promptLogin: flags.newAccount === true,
         resolveClientId: (identity, prevErr) => decideLoginClientId({
           view, identity, cfg, flags, prevErr,
         }),
         onUrl: (url) => {
           say('');
           say(`${C.yellow}请在弹出的浏览器里完成统一登录${C.reset}（未自动弹出就手动打开下面地址）`);
+          if (flags.newAccount === true) {
+            say(`${C.dim}已带 prompt=login：认证中心会要求重新登录账号（不支持该参数时等于普通登录）${C.reset}`);
+          } else if (accountsLib.listAccounts(view).length >= 1) {
+            say(`${C.dim}换个人登录：改用 npx nx-rt auth login --new-account，或把上面地址复制到无痕窗口打开（回调在本机，哪个浏览器打开都行）${C.reset}`);
+          }
           say(`${C.dim}${url}${C.reset}`);
           say('');
           say(`${C.dim}等待授权回调…（5 分钟超时）${C.reset}`);
