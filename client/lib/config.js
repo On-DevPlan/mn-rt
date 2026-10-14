@@ -297,7 +297,10 @@ const FLAT_AUTH_KEYS = ['deviceToken', 'sessionKey', 'authUser', 'clientId'];
  *   - 默认（多账号）：只清**当前激活**那一个账号——删它的条目、清 flat 凭据、
  *     摘掉 activeAccount 指针；其余账号原样保留，但**不自动接任**新账号
  *     （静默换成另一个人的身份比"多敲一条命令"危险得多）。清完就是"未登录"态。
- *   - `{all: true}`：清空整张账号表（本机彻底退出统一登录）。
+ *     刻意**保留** `deviceIds`：那只是"账号 → 本机设备标识"的记忆，不是凭据。
+ *     留着它，同一个账号重新登录会恢复原设备（手机端照旧连得上），
+ *     而不是每登一次就多出一台连不上的新电脑。
+ *   - `{all: true}`：清空整张账号表 + 设备标识记忆（本机彻底退出统一登录）。
  *
  * 两条路都刻意**不动** `alignKey` 与 `token`——那是老的"人手传配对 key / RT_TOKEN"
  * 路径，与统一登录并存，logout 不应该顺手把人家的旧配置清了。
@@ -312,9 +315,10 @@ function clearAuthCredentials(opts = {}) {
   const hadMap = existing.accounts !== undefined || existing.activeAccount !== undefined;
 
   if (opts.all) {
-    if (!hadFlat && !hadMap) return { changed: false, file, remaining: 0 };
+    const hadDeviceIds = existing.deviceIds !== undefined;
+    if (!hadFlat && !hadMap && !hadDeviceIds) return { changed: false, file, remaining: 0 };
     const next = { ...existing };
-    for (const k of [...FLAT_AUTH_KEYS, 'accounts', 'activeAccount']) delete next[k];
+    for (const k of [...FLAT_AUTH_KEYS, 'accounts', 'activeAccount', 'deviceIds']) delete next[k];
     writeConfigFile(next);
     return { changed: true, file, remaining: 0 };
   }
@@ -346,6 +350,10 @@ function clearAuthCredentials(opts = {}) {
  *
  * 惰性迁移在这里固化：老配置里的 flat 凭据会由 withAccounts 合成为首个条目，
  * 于是"第二个人登录"不会把第一个人的登录态挤掉。
+ *
+ * 同时记下 `deviceIds[账号] = clientId`：这份"账号 → 本机设备标识"的记忆**不随登出
+ * 清掉**（见 clearAuthCredentials），于是同一账号登出再登回来会恢复原标识，
+ * 不会每登一次就在服务端多出一台"再也连不上的电脑"。
  * @param {{entry: object, setActive?: boolean}} args
  * @returns {{changed: boolean, key: string, file: string}}
  */
@@ -364,6 +372,10 @@ function saveAuthAccount({ entry, setActive = true }) {
     [key]: entryWithId,
   };
   const next = { ...existing, accounts };
+  // 账号 → 设备标识的记忆（与凭据分开存，登出不清）
+  if (accounts[key].clientId) {
+    next.deviceIds = { ...(existing.deviceIds || {}), [key]: accounts[key].clientId };
+  }
   if (setActive) {
     next.activeAccount = key;
     Object.assign(next, accountsLib.buildFlatSyncPatch(accounts[key]));

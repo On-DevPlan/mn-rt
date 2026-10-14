@@ -129,6 +129,8 @@ function formatCandidates(list) {
  * 服务端注册表是 clientId→属主 的**永久一对一**，所以只能是：
  *   - 这个账号本机已有条目 → 沿用它的 clientId（只换令牌：绑定与会话密钥都不变，
  *     手机端缓存的那把密钥继续有效）；
+ *   - 凭据已登出、但本机**记得**这个账号的设备标识（config.json 的 deviceIds）
+ *     → 仍沿用旧标识：同一个账号重登不该变成"一台新电脑"；
  *   - 本机一个账号都没有 → 用机器默认标识（= 首次登录的既有行为）；万一这个标识
  *     其实早已被别人登记（配置被清过 / 换过机器），服务端会 403，此时
  *     retryOnOwnedByOther 让调用方带着 prevErr 再来问一次，换新标识兜底；
@@ -140,12 +142,12 @@ function formatCandidates(list) {
  * @param {{accounts:object}} view withAccounts 的视图
  * @param {{userId:string}} identity 身份预检结果
  * @param {{serverHttp:string, machineClientId:string, explicitClientId?:string|null,
- *          deviceName?:string, explicitDeviceName?:boolean, prevErr?:Error|null,
- *          generate?:(taken:Set<string>) => string}} opts
+ *          rememberedClientId?:string|null, deviceName?:string, explicitDeviceName?:boolean,
+ *          prevErr?:Error|null, generate?:(taken:Set<string>) => string}} opts
  *        generate 是注入点，真实调用方传 config.generateClientId（会把已用过的 id 排除）；
  *        不传时用本地兜底生成器，好让本模块保持零依赖。
  * @returns {{clientId:string, deviceName:string, retryOnOwnedByOther:boolean,
- *            reason:'explicit'|'reuse'|'machine'|'fresh'|'retry'}}
+ *            reason:'explicit'|'reuse'|'remembered'|'machine'|'fresh'|'retry'}}
  */
 function planLoginClientId(view, identity, opts = {}) {
   const list = listAccounts(view);
@@ -171,6 +173,19 @@ function planLoginClientId(view, identity, opts = {}) {
       deviceName: pickName(hit.deviceName),
       retryOnOwnedByOther: false,
       reason: 'reuse',
+    };
+  }
+  // 本机曾为这个账号登记过设备标识，只是凭据被登出清掉了（deviceIds 记着）：
+  // 沿用旧标识——同一个账号重登不该变成"一台新电脑"。否则手机会多出一条再也
+  // 连不上的设备，服务端注册表也会一直堆孤儿记录（服务端没有解绑途径）。
+  // 这里允许 403 兜底：万一这个标识在服务端已属于别人（配置被搬过），
+  // 换新标识是对的，不能卡死在登录不了。
+  if (opts.rememberedClientId) {
+    return {
+      clientId: opts.rememberedClientId,
+      deviceName: name,
+      retryOnOwnedByOther: true,
+      reason: 'remembered',
     };
   }
   if (list.length === 0) {

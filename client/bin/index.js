@@ -216,10 +216,16 @@ function printPlatformNotes(logger) {
  * @returns {{clientId:string, deviceName:string, retryOnOwnedByOther:boolean}}
  */
 function decideLoginClientId({ view, identity, cfg, flags, prevErr }) {
+  // 本机记得的该账号设备标识：登出只清凭据、不清这个，所以同一账号登回来
+  // 还是原来那台"电脑"（手机端不会多出一条连不上的设备）
+  const remembered = (readConfigFile().deviceIds || {})[
+    accountsLib.accountKey(cfg.serverHttp, identity.userId)
+  ] || null;
   const plan = accountsLib.planLoginClientId(view, identity, {
     serverHttp: cfg.serverHttp,
     machineClientId: ensureClientId(),
     explicitClientId: (flags && flags.clientId) ? cfg.clientId : null,
+    rememberedClientId: remembered,
     deviceName: cfg.deviceName,
     explicitDeviceName: Boolean(flags && flags.deviceName),
     prevErr,
@@ -227,7 +233,10 @@ function decideLoginClientId({ view, identity, cfg, flags, prevErr }) {
   });
   // 决策逻辑在 lib/accounts.js（纯函数、有单测）；提示文案留在命令层
   if (plan.reason === 'retry') {
-    say(`${C.yellow}! 机器默认标识已被其他账号登记，本次改用新标识${C.reset}：${plan.clientId}`);
+    say(`${C.yellow}! 本机默认标识在服务端已属于另一个账号${C.reset}`
+      + `（服务端不允许改绑），本次为这个账号分配独立标识：${plan.clientId}`);
+  } else if (plan.reason === 'remembered') {
+    say(`${C.dim}沿用该账号在本机的既有标识 ${plan.clientId}（服务端那边仍是同一台设备，手机端不会多出一台）${C.reset}`);
   } else if (plan.reason === 'fresh') {
     say(`${C.dim}本机已存其他账号，本次为该账号分配独立标识 ${plan.clientId}（手机端会把它当成一台单独的电脑）${C.reset}`);
   }
@@ -327,6 +336,9 @@ async function cmdAuth(cfg, rest, flags = {}) {
       clientId: res.clientId || cfg.clientId,
       loginAt: Date.now(),
     };
+    // 登录前后是同一个账号（其实是认证中心那边还登着谁就授权给谁）：
+    // 多人共用一台电脑时，这正是"我要登另一个人的账号"最容易踩空的地方
+    const sameAsBefore = Boolean(view.activeAccountKey && view.activeAccountKey === accountsLib.entryKeyOf(accountEntry));
     const saved = saveAuthAccount({ entry: accountEntry, setActive: true });
     const storedCount = accountsLib.listAccounts(
       accountsLib.withAccounts(readConfigFile(), {}),
@@ -345,8 +357,14 @@ async function cmdAuth(cfg, rest, flags = {}) {
       say(`${C.dim}设备令牌有效期约 ${days} 天，过期后重新执行 npx nx-rt auth login${C.reset}`);
     }
     say(`${C.dim}已保存 → ${saved.file}${C.reset}`);
+    if (sameAsBefore) {
+      say(`${C.yellow}! 认证中心那边仍登录着同一个账号${C.reset}`
+        + `${C.dim}（浏览器里有会话，授权是自动过的）。本意是换个人登录的话：先在浏览器里退出该账号，或换个无痕窗口重试${C.reset}`);
+    }
     if (storedCount >= 2) {
       say(`${C.dim}本机已存 ${storedCount} 个账号：npx nx-rt auth list 查看，npx nx-rt auth switch <账号> 切换${C.reset}`);
+    } else if (!sameAsBefore) {
+      say(`${C.dim}要再登一个人：直接再执行一次 npx nx-rt auth login（两个账号并存，不必先注销）${C.reset}`);
     }
     say(`${C.green}现在直接 npx nx-rt 即可启动，手机端的「远程输入」里能看到这台电脑${C.reset}`);
     return;
@@ -373,6 +391,15 @@ async function cmdAuth(cfg, rest, flags = {}) {
     if (!list.length) {
       say(`${C.yellow}本机还没有已存账号${C.reset}：先执行 npx nx-rt auth login`);
       process.exitCode = 1;
+      return;
+    }
+
+    // 只有一个账号时没有"切换"可言：直接说清楚，不摆一个只能选 1 的选择器
+    if (list.length === 1 && !target) {
+      const only = list[0];
+      say(`${C.dim}本机只有 1 个账号${C.reset}：${accountsLib.labelOf(only.entry)}`
+        + `（clientId ${only.entry.clientId || '(无)'}）`);
+      say(`${C.dim}要换别人用这台电脑：让对方执行 npx nx-rt auth login 登录他的账号，两个账号会并存，再用 auth switch 切${C.reset}`);
       return;
     }
 
@@ -431,6 +458,10 @@ async function cmdAuth(cfg, rest, flags = {}) {
     say(all
       ? `${C.green}✓ 已清除本机全部账号凭据${C.reset}（${r.file}）`
       : `${C.green}✓ 已清除当前账号的凭据${C.reset}（${r.file}）`);
+    if (!all) {
+      // 说清代价：登出只丢"凭据"，不丢"这台电脑的身份"——同账号重登即恢复
+      say(`${C.dim}该账号在本机的设备标识仍记着：重新 npx nx-rt auth login 登录它会恢复到原来那台设备${C.reset}`);
+    }
     if (r.remaining > 0) {
       say(`${C.dim}本机还剩 ${r.remaining} 个账号：npx nx-rt auth list 查看，npx nx-rt auth switch <账号> 切回某个账号${C.reset}`);
     }

@@ -1598,6 +1598,93 @@ test('手改坏的条目：读的时候被忽略，写的时候原样保留（�
   });
 });
 
+test('planLoginClientId：记得住的标识（登出再登）比"新生成"和"机器默认"都优先', () => {
+  // 回归：登出不该把"该账号在本机的设备标识"一起忘掉——否则同一账号重登
+  // 都会变成"一台新电脑"，手机端多出一条再也连不上的设备，服务端注册表一直堆
+  // 孤儿记录。记住的标识撞 403（标识在服务端被搬过/改绑过）才允许 retry。
+  const view = accountsLib.withAccounts({});
+  const plan = accountsLib.planLoginClientId(view, { userId: 'u-a' }, {
+    serverHttp: 'http://h',
+    machineClientId: 'pc-machine',
+    rememberedClientId: 'pc-stale-binding',
+    deviceName: '书房电脑',
+    generate: () => 'pc-fresh',
+  });
+  assert.strictEqual(plan.reason, 'remembered');
+  assert.strictEqual(plan.clientId, 'pc-stale-binding');
+  assert.strictEqual(plan.retryOnOwnedByOther, true,
+    '记得住的标识碰 403 也得让换新（不能卡死登不回来）');
+
+  // 显式 --client-id 仍最高优先（不会让 remembered 盖过它）
+  const explicit = accountsLib.planLoginClientId(view, { userId: 'u-a' }, {
+    serverHttp: 'http://h', machineClientId: 'pc-machine',
+    rememberedClientId: 'pc-stale-binding', explicitClientId: 'pc-pinned',
+    deviceName: 'x', generate: () => 'pc-fresh',
+  });
+  assert.strictEqual(explicit.reason, 'explicit');
+
+  // 凭据里**已有**这个账号 → 走 reuse，不走 remembered（reused 的更权威）
+  const withEntry = accountsLib.withAccounts({
+    accounts: { 'http://h::u-a': { userId: 'u-a', deviceToken: 'd', clientId: 'pc-fresh-entry' } },
+  });
+  const reuse = accountsLib.planLoginClientId(withEntry, { userId: 'u-a' }, {
+    serverHttp: 'http://h', machineClientId: 'pc-machine',
+    rememberedClientId: 'pc-stale-binding', deviceName: 'x', generate: () => 'pc-elsewhere',
+  });
+  assert.strictEqual(reuse.reason, 'reuse');
+  assert.strictEqual(reuse.clientId, 'pc-fresh-entry');
+});
+
+test('saveAuthAccount：把"账号→设备标识"记进 deviceIds（登出后仍可复用）', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, readConfigFile } = require('../lib/config');
+    saveAuthAccount({
+      entry: {
+        userId: 'u-a', email: 'a@x.com', deviceToken: 'dev.a', sessionKey: 'SK1',
+        serverHttp: 'http://h', url: 'ws://h/ws', clientId: 'pc-fni0sr',
+        deviceName: '书房电脑', loginAt: 1, expiresAt: Date.now() + 1000,
+      },
+      setActive: true,
+    });
+    const raw = readConfigFile();
+    assert.deepStrictEqual(raw.deviceIds, { 'http://h::u-a': 'pc-fni0sr' },
+      'deviceIds 必须存上；登出不会动它');
+  });
+});
+
+test('clearAuthCredentials：默认登出只清凭据不动 deviceIds；--all 一并清掉', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, clearAuthCredentials, readConfigFile } = require('../lib/config');
+    const mk = (uid, cid) => ({
+      userId: uid, email: `${uid}@x.com`, deviceToken: `d-${uid}`, sessionKey: `K-${uid}`,
+      clientId: cid, serverHttp: 'http://h', url: 'ws://h/ws',
+      deviceName: 'pc', loginAt: 1, expiresAt: Date.now() + 1000,
+    });
+    saveAuthAccount({ entry: mk('u-a', 'pc-fni0sr') });
+    saveAuthAccount({ entry: mk('u-b', 'pc-tynxcz') });
+
+    // 切到 B 登出：删 B 的条目 + flat 凭据，但 deviceIds 两人都留着
+    (function () { /* ensure active is B so logout default removes B */
+      const { readConfigFile, writeConfigFile } = require('../lib/config');
+      const raw = readConfigFile();
+      writeConfigFile({ ...raw, activeAccount: 'http://h::u-b' });
+    })();
+    const r1 = clearAuthCredentials();
+    assert.strictEqual(r1.changed, true);
+    const after1 = readConfigFile();
+    assert.strictEqual(after1.deviceIds['http://h::u-b'], 'pc-tynxcz',
+      '刚登出的账号也要留着标识——它重登回来正是靠这条恢复成原来那台设备');
+    assert.strictEqual(after1.deviceIds['http://h::u-a'], 'pc-fni0sr',
+      'A 的 deviceIds 始终在');
+    assert.deepStrictEqual(Object.keys(after1.accounts), ['http://h::u-a']);
+
+    // --all：deviceIds 一并清掉（"清空"就是要彻底）
+    const r2 = clearAuthCredentials({ all: true });
+    assert.strictEqual(r2.changed, true);
+    assert.strictEqual(readConfigFile().deviceIds, undefined);
+  });
+});
+
 test('isExpired：按 expiresAt 判定，缺字段视为未知（不算过期）', () => {
   assert.strictEqual(accountsLib.isExpired({ expiresAt: Date.now() + 1000 }), false);
   assert.strictEqual(accountsLib.isExpired({ expiresAt: Date.now() - 1000 }), true);

@@ -236,9 +236,13 @@ npx nx-rt serve --account bob # 或者临时以某个账号连接，不改动本
   老版本客户端读到这份配置会忽略新字段、照 flat 正常工作（降级安全）。
 - `auth switch` 只改本机状态，**正在跑的 serve 不会自动换账号**：Ctrl+C 结束它再起。
 - 一台电脑**同时只跑一个 serve**——两个账号的 serve 会争抢同一个物理键盘。
-- `auth logout` 之后重新登录同一个账号：本机**还存着别的账号**时会领到**新的 clientId**
-  （本机账号表空了则仍沿用机器默认标识，绑定不变）。前一种情况旧记录留在服务端注册表里，
-  无害但不会自动消失——想保留原绑定就别 logout，直接 `auth switch` 切回来。
+- **登出不丢"这台电脑的身份"**：`config.json` 里除了凭据，还有一份
+  `deviceIds`（账号 → 本机设备标识）。登出只清凭据，标识留着——同一个账号重新
+  `auth login` 会**恢复到原来那台设备**（会话密钥照旧、手机端不会多出一条连不上的
+  电脑）。只有 `auth logout --all` 才会连这份记忆一起清掉（之后重登会重新分配标识）。
+- **换人登录要先在浏览器里退出**：认证中心（auth-hub）那边有会话，谁登着就自动授权给谁，
+  所以"想登另一个人"却还是同一个人是常见的踩空。CLI 检测到"登录前后是同一个账号"时会
+  提示你；照着提示在浏览器退出该账号，或换个无痕窗口再跑 `auth login` 即可。
 - 一台机器别混用两个客户端版本：老版本的 CLI 只认 flat 字段，它做的登录/登出不会同步
   账号表，两边混着跑会把状态写岔。
 - 隔离照旧：每个 clientId 仍只属于一个属主，跨属主注入一律 `forbidden`，
@@ -251,7 +255,7 @@ npx nx-rt auth login                   # 统一登录（弹浏览器）
 npx nx-rt auth list                    # 本机已存账号一览（当前账号带 *）
 npx nx-rt auth switch <账号>            # 切换当前账号（不带参数给编号选择器）
 npx nx-rt auth status                  # 我是谁 / 令牌剩余有效期 / 本机是否已登记
-npx nx-rt auth logout [--all]          # 清除当前账号凭据（--all 清空全部账号）
+npx nx-rt auth logout [--all]          # 清除当前账号凭据（--all 清空全部账号与设备标识记忆）
 npx nx-rt serve --account <账号>        # 本次以指定账号连接，不改激活账号
 npx nx-rt serve --url <ws-url> --client-id <id> --log-level debug
 npx nx-rt serve --key MYKEY123         # 两端用同一个 key（旧手动配对）
