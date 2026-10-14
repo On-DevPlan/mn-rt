@@ -753,10 +753,13 @@ const os = require('os');
 function withTempHome(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-cfg-test-'));
   const saved = {
+    // NX_RT_HOME 优先于 REMOTETYPE_HOME：开发机若全局设过它，测试会写到真实配置目录
+    NX_RT_HOME: process.env.NX_RT_HOME,
     REMOTETYPE_HOME: process.env.REMOTETYPE_HOME,
     APPDATA: process.env.APPDATA,
     USERPROFILE: process.env.USERPROFILE,
   };
+  process.env.NX_RT_HOME = dir;
   process.env.REMOTETYPE_HOME = dir;
   // 迁移逻辑会扫「真实旧目录」（APPDATA\remotetype 与 ~/.remotetype），
   // 测试期间必须把它们也指进临时区，否则会拷到真机数据
@@ -1248,6 +1251,560 @@ test('bin/index.js 语法可解析（不能 require，它会直接跑 main）', 
   } catch (e) {
     throw new Error(`bin/index.js 语法错误：${e.stderr ? e.stderr.toString() : e.message}`);
   }
+});
+
+// ==================== 多账号：accounts.js 纯逻辑 ====================
+
+console.log('\n== accounts：多账号账号簿 ==');
+
+const accountsLib = require('../lib/accounts');
+
+test('accountKey：忽略尾斜杠，部署 + userId 拼成唯一键', () => {
+  assert.strictEqual(accountsLib.normalizeServerHttp('http://h:8790///'), 'http://h:8790');
+  assert.strictEqual(accountsLib.normalizeServerHttp('  http://h:8790 '), 'http://h:8790');
+  assert.strictEqual(accountsLib.accountKey('http://h:8790/', 'u-1'), 'http://h:8790::u-1');
+  assert.notStrictEqual(
+    accountsLib.accountKey('http://h:8791', 'u-1'),
+    accountsLib.accountKey('http://h:8790', 'u-1'),
+    '不同部署上的同一 userId 必须是两个互不覆盖的账号',
+  );
+});
+
+test('withAccounts：空配置 → 空表；legacy flat 凭据 → 合成首条目', () => {
+  assert.deepStrictEqual(accountsLib.withAccounts({}), { accounts: {}, activeAccountKey: null });
+  assert.deepStrictEqual(accountsLib.withAccounts(undefined).accounts, {});
+
+  const legacy = {
+    url: 'ws://h:8790/ws',
+    serverHttp: 'http://h:8790',
+    deviceToken: 'dev.abc',
+    sessionKey: 'S1',
+    deviceName: '书房电脑',
+    authUser: { userId: 'u-1', email: 'a@x.com', loginAt: 1, expiresAt: 2 },
+  };
+  const v = accountsLib.withAccounts(legacy, { defaultClientId: 'pc-machine' });
+  assert.deepStrictEqual(Object.keys(v.accounts), ['http://h:8790::u-1']);
+  assert.strictEqual(v.activeAccountKey, 'http://h:8790::u-1', '迁移出来的唯一条目就是当前账号');
+  const e = v.accounts['http://h:8790::u-1'];
+  assert.strictEqual(e.clientId, 'pc-machine');
+  assert.strictEqual(e.expiresAt, 2);
+  assert.strictEqual(e.sessionKey, 'S1');
+});
+
+test('withAccounts：flat 里有 clientId 时优先用它（保住既有绑定）', () => {
+  const v = accountsLib.withAccounts({
+    serverHttp: 'http://h',
+    deviceToken: 'd',
+    clientId: 'pc-handwritten',
+    authUser: { userId: 'u-1' },
+  }, { defaultClientId: 'pc-machine' });
+  assert.strictEqual(Object.values(v.accounts)[0].clientId, 'pc-handwritten');
+});
+
+test('withAccounts：已迁移则原样返回，畸形条目被丢弃', () => {
+  const raw = {
+    activeAccount: 'http://h::u-2',
+    accounts: {
+      'http://h::u-1': { userId: 'u-1', deviceToken: 'd1' },
+      'http://h::u-2': { userId: 'u-2', deviceToken: 'd2' },
+      'http://h::u-3': { userId: 'u-3' }, // 没有 deviceToken
+      'http://h::u-4': null,
+    },
+  };
+  const v = accountsLib.withAccounts(raw);
+  assert.deepStrictEqual(Object.keys(v.accounts).sort(), ['http://h::u-1', 'http://h::u-2']);
+  assert.strictEqual(v.activeAccountKey, 'http://h::u-2');
+  // 幂等：再跑一次结果不变
+  assert.deepStrictEqual(
+    accountsLib.withAccounts({ ...raw, accounts: v.accounts }).accounts,
+    v.accounts,
+  );
+});
+
+test('withAccounts：指针指向不存在的条目 → 视为未激活（不猜）', () => {
+  const v = accountsLib.withAccounts({
+    activeAccount: 'http://h::gone',
+    accounts: { 'http://h::u-1': { userId: 'u-1', deviceToken: 'd1' } },
+  });
+  assert.strictEqual(v.activeAccountKey, null,
+    '只剩一个条目也不能自动激活——logout 之后必须如实显示"未登录"');
+});
+
+test('listAccounts：按 key 升序（序号匹配与展示共用同一顺序）', () => {
+  const v = accountsLib.withAccounts({
+    accounts: {
+      'http://h::u-c': { userId: 'u-c', deviceToken: 'd' },
+      'http://a::u-a': { userId: 'u-a', deviceToken: 'd' },
+      'http://h::u-b': { userId: 'u-b', deviceToken: 'd' },
+    },
+  });
+  assert.deepStrictEqual(
+    accountsLib.listAccounts(v).map((a) => a.key),
+    ['http://a::u-a', 'http://h::u-b', 'http://h::u-c'],
+  );
+});
+
+/** 两个账号的配置：alice（激活）+ bob。 */
+function twoAccountsRaw() {
+  return {
+    activeAccount: 'http://h::u-alice',
+    accounts: {
+      'http://h::u-alice': {
+        userId: 'u-alice', email: 'alice@x.com', nickname: 'Alice', deviceToken: 'dA',
+        sessionKey: 'KA', clientId: 'pc-a', serverHttp: 'http://h', url: 'ws://h/ws',
+      },
+      'http://h::u-bob': {
+        userId: 'u-bob', email: 'bob@y.com', username: 'bobby', deviceToken: 'dB',
+        sessionKey: 'KB', clientId: 'pc-b', serverHttp: 'http://h', url: 'ws://h/ws',
+      },
+    },
+  };
+}
+
+test('resolveAccountEntry：完整 key / userId / 邮箱（忽略大小写）/ 昵称子串 / 序号', () => {
+  const raw = twoAccountsRaw();
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, 'http://h::u-alice').entry.userId, 'u-alice');
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, 'u-bob').entry.userId, 'u-bob');
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, 'ALICE@X.COM').entry.userId, 'u-alice');
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, 'obb').entry.userId, 'u-bob');
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, '1').entry.userId, 'u-alice');
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, '2').entry.userId, 'u-bob');
+});
+
+test('resolveAccountEntry：歧义 / 未命中 / 越界都抛错，且错误信息带候选清单', () => {
+  const raw = twoAccountsRaw();
+  assert.throws(() => accountsLib.resolveAccountEntry(raw, 'com'), /匹配到多个账号/);
+  assert.throws(() => accountsLib.resolveAccountEntry(raw, 'nobody'), /找不到账号/);
+  assert.throws(() => accountsLib.resolveAccountEntry(raw, '9'), /超出范围/);
+  assert.throws(() => accountsLib.resolveAccountEntry(raw, ''), /未指定账号/);
+  assert.throws(() => accountsLib.resolveAccountEntry({}, 'x'), /还没有已存账号/);
+  try {
+    accountsLib.resolveAccountEntry(raw, 'nobody');
+  } catch (e) {
+    assert.ok(e.message.includes('alice@x.com') && e.message.includes('bob@y.com'),
+      '报错必须把可选账号列出来，否则用户不知道该填什么');
+  }
+});
+
+test('buildFlatSyncPatch：含 clientId（系铃处），身份快照走 authUser.expiresAt', () => {
+  const patch = accountsLib.buildFlatSyncPatch({
+    userId: 'u-1', email: 'a@x.com', deviceToken: 'd', sessionKey: 'K',
+    clientId: 'pc-1', serverHttp: 'http://h/', url: 'ws://h/ws', deviceName: '书房电脑',
+    loginAt: 5, expiresAt: 9,
+  });
+  assert.strictEqual(patch.clientId, 'pc-1', '不写 clientId → serve 会退回机器默认 id → 4401');
+  assert.strictEqual(patch.serverHttp, 'http://h');
+  assert.deepStrictEqual(patch.authUser, {
+    userId: 'u-1', email: 'a@x.com', username: '', nickname: '', loginAt: 5, expiresAt: 9,
+  });
+  // 空字段不下发：绝不把 flat 里已有的值抹白
+  const thin = accountsLib.buildFlatSyncPatch({ userId: 'u-2', deviceToken: 'd2' });
+  assert.ok(!('sessionKey' in thin) && !('clientId' in thin) && !('url' in thin));
+});
+
+test('planLoginClientId：五个分支——机器默认 / 沿用 / 领新 / 显式 / 403 兜底', () => {
+  const mk = (uid, cid, name) => ({
+    userId: uid, deviceToken: 'd', clientId: cid, deviceName: name || '', serverHttp: 'http://h',
+  });
+  const empty = accountsLib.withAccounts({});
+  const one = accountsLib.withAccounts({
+    accounts: { 'http://h::u-a': mk('u-a', 'pc-a', '书房电脑') },
+  });
+  const two = accountsLib.withAccounts({
+    accounts: {
+      'http://h::u-a': mk('u-a', 'pc-a', '书房电脑'),
+      'http://h::u-b': mk('u-b', 'pc-b', '笔记本'),
+    },
+  });
+  // 确定性生成器：既能看到它避开了哪些 id，也能断言结果与已存账号不撞车
+  const gen = (taken) => {
+    for (let i = 0; ; i += 1) {
+      const id = `pc-gen${i}`;
+      if (!taken.has(id)) return id;
+    }
+  };
+  const base = {
+    serverHttp: 'http://h', machineClientId: 'pc-machine', deviceName: '书房电脑', generate: gen,
+  };
+
+  // ① 机器上还没有任何账号 → 机器默认标识（首次登录的既有行为），并允许 403 兜底
+  const first = accountsLib.planLoginClientId(empty, { userId: 'u-a' }, base);
+  assert.strictEqual(first.clientId, 'pc-machine');
+  assert.strictEqual(first.reason, 'machine');
+  assert.strictEqual(first.retryOnOwnedByOther, true, '机器默认标识可能早已被别人登记，要留一次兜底');
+
+  // ② 同账号重登 → 沿用原标识与原设备名（只换令牌，绑定与会话密钥不变）
+  const again = accountsLib.planLoginClientId(one, { userId: 'u-a' }, { ...base, deviceName: 'hostname' });
+  assert.strictEqual(again.clientId, 'pc-a');
+  assert.strictEqual(again.deviceName, '书房电脑', '条目里存的名字优先，手机端看着不变');
+  assert.strictEqual(again.reason, 'reuse');
+  assert.strictEqual(again.retryOnOwnedByOther, false, '复用路径撞 403 必须如实报错，不许自己换 id');
+
+  // ②b 显式 --device-name 覆盖条目里的名字
+  const renamed = accountsLib.planLoginClientId(one, { userId: 'u-a' }, {
+    ...base, deviceName: '客厅电脑', explicitDeviceName: true,
+  });
+  assert.strictEqual(renamed.deviceName, '客厅电脑');
+
+  // ③ 本机已有别的账号 → 领新标识，且避开已用过的
+  const second = accountsLib.planLoginClientId(one, { userId: 'u-b' }, base);
+  assert.strictEqual(second.reason, 'fresh');
+  assert.notStrictEqual(second.clientId, 'pc-a');
+  const third = accountsLib.planLoginClientId(two, { userId: 'u-c' }, base);
+  assert.ok(!['pc-a', 'pc-b'].includes(third.clientId), '新标识不得与已存账号撞车');
+  assert.strictEqual(third.retryOnOwnedByOther, false);
+
+  // ④ 显式 --client-id 最高优先
+  const explicit = accountsLib.planLoginClientId(two, { userId: 'u-c' }, { ...base, explicitClientId: 'pc-fixed' });
+  assert.strictEqual(explicit.clientId, 'pc-fixed');
+  assert.strictEqual(explicit.reason, 'explicit');
+
+  // ⑤ 403 兜底：机器默认标识已被别人登记 → 换新标识，且不再重试
+  const retry = accountsLib.planLoginClientId(empty, { userId: 'u-a' }, {
+    ...base, prevErr: Object.assign(new Error('device_owned_by_other'), { code: 'device_owned_by_other' }),
+  });
+  assert.strictEqual(retry.reason, 'retry');
+  assert.notStrictEqual(retry.clientId, 'pc-machine');
+  assert.strictEqual(retry.retryOnOwnedByOther, false, '兜底只许用一次，第二次仍 403 就如实报错');
+});
+
+test('resolveAccountEntry：纯数字一律当序号，不被邮箱里的数字截胡', () => {
+  // 回归：序号分支曾经排在子串匹配之后，于是 auth switch 2 会被
+  // alice2@x.com 里的 "2" 命中，把用户切到**另一个**账号——选择器回传的正是数字串。
+  const raw = accountsLib.withAccounts({
+    accounts: {
+      'http://h::u-1': { userId: 'u-1', email: 'alice2@x.com', deviceToken: 'd1' },
+      'http://h::u-2': { userId: 'u-2', email: 'bob@y.com', deviceToken: 'd2' },
+    },
+  });
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, '2').entry.userId, 'u-2',
+    '输入 2 必须是列表里的第 2 个，而不是邮箱里含 2 的那个');
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, '1').entry.userId, 'u-1');
+  assert.throws(() => accountsLib.resolveAccountEntry(raw, '7'), /超出范围/);
+  // 非纯数字才走子串
+  assert.strictEqual(accountsLib.resolveAccountEntry(raw, 'alice2').entry.userId, 'u-1');
+});
+
+test('saveAuthAccount：老配置（无 flat clientId）迁移时用机器默认标识，绝不蹭新账号的', () => {
+  // 回归（严重）：0.5.x 的 config.json 里**没有** clientId（那时 saveConnectionConfig
+  // 根本不写它）。迁移时若拿"本次登录账号的 clientId"播种，两个账号会共用同一个标识，
+  // 老账号此后既登不回来（服务端 403），切过去也注册不上（4401）。
+  withTempHome(() => {
+    const { saveAuthAccount, readConfigFile, ensureClientId } = require('../lib/config');
+    const machineId = ensureClientId();
+    fs.writeFileSync(require('../lib/config').configFile(), JSON.stringify({
+      url: 'ws://h:8790/ws', serverHttp: 'http://h:8790',
+      deviceToken: 'dev.old', sessionKey: 'SKOLD', deviceName: '书房电脑',
+      authUser: { userId: 'u-old', email: 'old@x.com', expiresAt: 1, loginAt: 1 },
+      // 注意：**没有** clientId —— 这才是真实的老配置
+    }));
+
+    const r = saveAuthAccount({
+      entry: {
+        userId: 'u-new', deviceToken: 'dev.new', serverHttp: 'http://h:8790',
+        clientId: 'pc-bob', sessionKey: 'SKNEW', loginAt: 2,
+      },
+      setActive: true,
+    });
+    const raw = readConfigFile();
+    assert.strictEqual(raw.accounts['http://h:8790::u-old'].clientId, machineId,
+      '老账号的标识必须是机器默认标识（它当年就是用它绑定的）');
+    assert.strictEqual(raw.accounts[r.key].clientId, 'pc-bob');
+    assert.notStrictEqual(raw.accounts['http://h:8790::u-old'].clientId,
+      raw.accounts[r.key].clientId, '两个账号绝不能共用标识');
+  });
+});
+
+test('saveConnectionConfig：老配置只写 flat，不凭空生成账号表（行为与升级前一致）', () => {
+  withTempHome(() => {
+    const { saveConnectionConfig, readConfigFile, loadConfig, configFile } = require('../lib/config');
+    fs.writeFileSync(configFile(), JSON.stringify({
+      url: 'ws://h:8790/ws', serverHttp: 'http://h:8790',
+      deviceToken: 'dev.old', sessionKey: 'SKOLD',
+      authUser: { userId: 'u-old', email: 'old@x.com' },
+      // 老配置：没有 clientId、没有 accounts
+    }));
+    const before = { ...readConfigFile() };
+
+    // 模拟 serve 连上后的回写（registered / 会话密钥两处都是这个形状）
+    saveConnectionConfig({
+      url: 'ws://h:8790/ws', deviceToken: 'dev.old', sessionKey: 'SK-NEW',
+      deviceName: 'hostname', serverHttp: 'http://h:8790',
+    });
+
+    const raw = readConfigFile();
+    assert.strictEqual(raw.accounts, undefined, '老配置不该被悄悄升级成账号表');
+    assert.strictEqual(raw.activeAccount, undefined);
+    assert.strictEqual(raw.sessionKey, 'SK-NEW');
+    assert.strictEqual(raw.alignKey, before.alignKey);
+    assert.strictEqual(loadConfig({}).clientId.length > 0, true);
+  });
+});
+
+test('迁移后的老账号 clientId 非空：switch 过去不会带上前一个账号的标识', () => {
+  withTempHome(() => {
+    const {
+      saveAuthAccount, switchActiveAccount, saveConnectionConfig,
+      readConfigFile, loadConfig, ensureClientId, configFile,
+    } = require('../lib/config');
+    const machineId = ensureClientId();
+    fs.writeFileSync(configFile(), JSON.stringify({
+      url: 'ws://h:8790/ws', serverHttp: 'http://h:8790',
+      deviceToken: 'dev.old', sessionKey: 'SKOLD',
+      authUser: { userId: 'u-old', email: 'old@x.com' },
+    }));
+    // 老账号先跑一次 serve 回写（此时还没有账号表）
+    saveConnectionConfig({ url: 'ws://h:8790/ws', sessionKey: 'SKOLD' });
+    // 第二个人登录 → 迁移 + 新条目
+    saveAuthAccount({
+      entry: {
+        userId: 'u-new', deviceToken: 'dev.new', serverHttp: 'http://h:8790',
+        clientId: 'pc-bob', sessionKey: 'SKNEW', loginAt: 2,
+      },
+      setActive: true,
+    });
+    // 切回老账号：flat 的 clientId 必须是老账号自己的，不能留着 pc-bob
+    const r = switchActiveAccount('old@x.com', { defaultClientId: machineId });
+    assert.strictEqual(r.entry.clientId, machineId);
+    const raw = readConfigFile();
+    assert.strictEqual(raw.clientId, machineId);
+    assert.strictEqual(raw.deviceToken, 'dev.old');
+    const cfg = loadConfig({});
+    assert.strictEqual(cfg.clientId, machineId);
+    assert.strictEqual(cfg.deviceToken, 'dev.old', '令牌与标识必须成对，否则 register 直接 4401');
+  });
+});
+
+test('手改坏的条目：读的时候被忽略，写的时候原样保留（不替用户删数据）', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, readConfigFile, configFile } = require('../lib/config');
+    fs.writeFileSync(configFile(), JSON.stringify({
+      accounts: {
+        'http://h::u-ok': { userId: 'u-ok', deviceToken: 'd-ok', clientId: 'pc-ok', serverHttp: 'http://h' },
+        'http://h::u-broken': { userId: 'u-broken', note: '手改留下的半截条目' },
+      },
+      activeAccount: 'http://h::u-ok',
+    }));
+    const list = accountsLib.listAccounts(accountsLib.withAccounts(readConfigFile(), {}));
+    assert.deepStrictEqual(list.map((a) => a.key), ['http://h::u-ok'], '读的时候跳过不可用条目');
+
+    saveAuthAccount({
+      entry: { userId: 'u-new', deviceToken: 'd-new', clientId: 'pc-new', serverHttp: 'http://h' },
+      setActive: true,
+    });
+    const raw = readConfigFile();
+    assert.ok(raw.accounts['http://h::u-broken'], '写的时候不能因为我们看不懂就删掉它');
+    assert.strictEqual(raw.accounts['http://h::u-broken'].note, '手改留下的半截条目');
+  });
+});
+
+test('isExpired：按 expiresAt 判定，缺字段视为未知（不算过期）', () => {
+  assert.strictEqual(accountsLib.isExpired({ expiresAt: Date.now() + 1000 }), false);
+  assert.strictEqual(accountsLib.isExpired({ expiresAt: Date.now() - 1000 }), true);
+  assert.strictEqual(accountsLib.isExpired({}), false);
+});
+
+// ==================== 多账号：config.js 落盘 ====================
+
+console.log('\n== 多账号：config.js 账号簿落盘 ==');
+
+test('generateClientId：格式与 ensureClientId 一致，且能避让已用过的 id', () => {
+  const { generateClientId } = require('../lib/config');
+  const id = generateClientId();
+  assert.ok(/^[a-z0-9-]{1,20}-[a-z0-9]{6}$/.test(id), `clientId 格式异常：${id}`);
+
+  const seen = new Set();
+  for (let i = 0; i < 50; i += 1) seen.add(generateClientId());
+  assert.ok(seen.size >= 45, `随机性不足（50 次只出了 ${seen.size} 个）`);
+
+  const taken = new Set();
+  for (let i = 0; i < 30; i += 1) {
+    const fresh = generateClientId(taken);
+    assert.ok(!taken.has(fresh), 'exclude 里的 id 不得再被生成');
+    taken.add(fresh);
+  }
+});
+
+test('saveAuthAccount：首个账号写条目 + 指针 + flat 镜像（含 clientId）', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, readConfigFile, loadConfig } = require('../lib/config');
+    const entry = {
+      userId: 'u-1', email: 'a@x.com', username: 'a', nickname: 'Alice',
+      deviceToken: 'dev.a', expiresAt: Date.now() + 100000, sessionKey: 'SK1',
+      serverHttp: 'http://h:8790', url: 'ws://h:8790/ws', deviceName: '书房电脑',
+      clientId: 'pc-aaa111', loginAt: 111,
+    };
+    const r = saveAuthAccount({ entry, setActive: true });
+    assert.strictEqual(r.changed, true);
+    assert.strictEqual(r.key, 'http://h:8790::u-1');
+
+    const raw = readConfigFile();
+    assert.strictEqual(raw.activeAccount, r.key);
+    assert.strictEqual(raw.deviceToken, 'dev.a');
+    assert.strictEqual(raw.clientId, 'pc-aaa111');
+    assert.strictEqual(raw.authUser.userId, 'u-1');
+    assert.strictEqual(raw.authUser.expiresAt, entry.expiresAt);
+    // flat 必须就是 loadConfig 看到的东西
+    assert.strictEqual(loadConfig({}).clientId, 'pc-aaa111');
+  });
+});
+
+test('saveAuthAccount：第二个账号不挤掉第一个（惰性迁移 + 各自独立 clientId）', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, readConfigFile, configFile } = require('../lib/config');
+    // 先摆一份 0.5.x 风格的老配置：只有 flat 凭据，没有 accounts 表
+    fs.writeFileSync(configFile(), JSON.stringify({
+      url: 'ws://h:8790/ws', serverHttp: 'http://h:8790', clientId: 'pc-old',
+      deviceToken: 'dev.old', sessionKey: 'SKOLD', deviceName: '书房电脑',
+      authUser: { userId: 'u-old', email: 'old@x.com', expiresAt: 1, loginAt: 1 },
+      alignKey: 'LEGACY', token: 'RTTOKEN',
+    }));
+
+    const r = saveAuthAccount({
+      entry: {
+        userId: 'u-new', email: 'new@x.com', deviceToken: 'dev.new', sessionKey: 'SKNEW',
+        serverHttp: 'http://h:8790', url: 'ws://h:8790/ws', clientId: 'pc-new',
+        expiresAt: 2, loginAt: 2,
+      },
+      setActive: true,
+    });
+
+    const raw = readConfigFile();
+    assert.deepStrictEqual(Object.keys(raw.accounts).sort(),
+      ['http://h:8790::u-new', 'http://h:8790::u-old']);
+    assert.strictEqual(raw.activeAccount, r.key);
+    assert.strictEqual(raw.deviceToken, 'dev.new'); // flat 跟着新账号走
+    assert.strictEqual(raw.clientId, 'pc-new');
+    // 老账号原样留着：绑定与标识都没被挤掉，切回去还是原来那台"电脑"
+    assert.strictEqual(raw.accounts['http://h:8790::u-old'].deviceToken, 'dev.old');
+    assert.strictEqual(raw.accounts['http://h:8790::u-old'].clientId, 'pc-old');
+    assert.strictEqual(raw.accounts['http://h:8790::u-old'].sessionKey, 'SKOLD');
+    // 老的 --key / RT_TOKEN 路径不受影响
+    assert.strictEqual(raw.alignKey, 'LEGACY');
+    assert.strictEqual(raw.token, 'RTTOKEN');
+  });
+});
+
+test('saveAuthAccount：同账号重登不新增条目，clientId 不变', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, readConfigFile } = require('../lib/config');
+    const base = {
+      userId: 'u-1', deviceToken: 'd1', serverHttp: 'http://h',
+      clientId: 'pc-1', deviceName: '书房电脑',
+    };
+    saveAuthAccount({ entry: { ...base, loginAt: 1 } });
+    const r2 = saveAuthAccount({ entry: { ...base, deviceToken: 'd2', loginAt: 2 } });
+    const raw = readConfigFile();
+    assert.strictEqual(Object.keys(raw.accounts).length, 1, '重登不得新增条目');
+    assert.strictEqual(raw.accounts[r2.key].deviceToken, 'd2');
+    assert.strictEqual(raw.accounts[r2.key].clientId, 'pc-1');
+  });
+});
+
+test('switchActiveAccount：flat 全量镜像目标账号（含 url / serverHttp / clientId）', () => {
+  withTempHome(() => {
+    const {
+      saveAuthAccount, switchActiveAccount, readConfigFile, loadConfig, configFile,
+    } = require('../lib/config');
+    const exp = Date.now() + 100000;
+    saveAuthAccount({
+      entry: {
+        userId: 'u-a', email: 'a@x.com', deviceToken: 'dA', sessionKey: 'KA', clientId: 'pc-a',
+        serverHttp: 'http://h1', url: 'ws://h1/ws', deviceName: 'AlicePC',
+        expiresAt: exp, loginAt: 1,
+      },
+    });
+    saveAuthAccount({
+      entry: {
+        userId: 'u-b', email: 'b@x.com', deviceToken: 'dB', sessionKey: 'KB', clientId: 'pc-b',
+        serverHttp: 'http://h2', url: 'ws://h2/ws', deviceName: 'BobPC',
+        expiresAt: exp, loginAt: 2,
+      },
+    });
+    assert.strictEqual(loadConfig({}).clientId, 'pc-b', '后登录的账号成为当前账号');
+
+    const r = switchActiveAccount('a@x.com', { defaultClientId: 'pc-machine' });
+    assert.strictEqual(r.key, 'http://h1::u-a');
+    const raw = readConfigFile();
+    assert.strictEqual(raw.deviceToken, 'dA');
+    assert.strictEqual(raw.sessionKey, 'KA');
+    assert.strictEqual(raw.clientId, 'pc-a');
+    assert.strictEqual(raw.serverHttp, 'http://h1'); // 跨部署切换必须一起走，否则拿 A 的令牌连 B
+    assert.strictEqual(raw.url, 'ws://h1/ws');
+    assert.strictEqual(raw.deviceName, 'AlicePC');
+    assert.strictEqual(raw.authUser.email, 'a@x.com');
+
+    // 系铃处回归：切换后 loadConfig 必须给出目标账号的 clientId，
+    // 否则 WS register 的 token cid 与上报 clientId 对不上 → 4401
+    const cfg = loadConfig({});
+    assert.strictEqual(cfg.clientId, 'pc-a');
+    assert.strictEqual(cfg.deviceToken, 'dA');
+
+    assert.throws(() => switchActiveAccount('nobody@x.com'), /找不到账号/);
+    const leftovers = fs.readdirSync(path.dirname(configFile())).filter((f) => f.includes('.tmp'));
+    assert.deepStrictEqual(leftovers, [], '原子写不得留下 .tmp 残留');
+  });
+});
+
+test('clearAuthCredentials：默认只清当前账号（其余留着），--all 清空，幂等', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, clearAuthCredentials, readConfigFile } = require('../lib/config');
+    const mk = (uid, cid) => ({
+      userId: uid, email: `${uid}@x.com`, deviceToken: `d-${uid}`, sessionKey: `K-${uid}`,
+      clientId: cid, serverHttp: 'http://h', url: 'ws://h/ws',
+      expiresAt: Date.now() + 100000, loginAt: 1,
+    });
+    saveAuthAccount({ entry: mk('u-a', 'pc-a') });
+    saveAuthAccount({ entry: mk('u-b', 'pc-b') }); // b 是当前账号
+
+    const r = clearAuthCredentials();
+    assert.strictEqual(r.changed, true);
+    assert.strictEqual(r.remaining, 1);
+    const raw = readConfigFile();
+    assert.deepStrictEqual(Object.keys(raw.accounts), ['http://h::u-a']);
+    assert.strictEqual(raw.activeAccount, undefined);
+    assert.strictEqual(raw.deviceToken, undefined);
+    assert.strictEqual(raw.clientId, undefined, 'clientId 属于那个账号，登出要一起摘掉');
+    assert.ok(!('authUser' in raw));
+
+    assert.strictEqual(clearAuthCredentials().changed, false, '已是未登录态 → 幂等');
+    const all = clearAuthCredentials({ all: true });
+    assert.strictEqual(all.changed, true);
+    assert.strictEqual(all.remaining, 0);
+    assert.strictEqual(readConfigFile().accounts, undefined);
+  });
+});
+
+test('saveConnectionConfig(cfg, {accountKey})：借用别人账号只写它的条目，flat 不动', () => {
+  withTempHome(() => {
+    const { saveAuthAccount, saveConnectionConfig, readConfigFile } = require('../lib/config');
+    const mk = (uid, cid) => ({
+      userId: uid, deviceToken: `d-${uid}`, sessionKey: `K-${uid}`, clientId: cid,
+      serverHttp: 'http://h', url: 'ws://h/ws', expiresAt: Date.now() + 100000, loginAt: 1,
+    });
+    const keyA = 'http://h::u-a';
+    saveAuthAccount({ entry: mk('u-a', 'pc-a') });
+    const rB = saveAuthAccount({ entry: mk('u-b', 'pc-b') });
+
+    const res = saveConnectionConfig({ sessionKey: 'K-A-NEW', url: 'ws://h2/ws' }, { accountKey: keyA });
+    assert.strictEqual(res.changed, true);
+    const raw = readConfigFile();
+    assert.strictEqual(raw.accounts[keyA].sessionKey, 'K-A-NEW');
+    assert.strictEqual(raw.accounts[keyA].url, 'ws://h2/ws');
+    // flat 必须继续镜像当前激活账号 B，不能被 A 的运行期字段污染
+    assert.strictEqual(raw.sessionKey, 'K-u-b');
+    assert.strictEqual(raw.url, 'ws://h/ws');
+    assert.strictEqual(raw.activeAccount, rB.key);
+
+    // 激活账号自己的运行期回写：条目与 flat 一起更新
+    // （只写 flat 的话，切走再切回来会拿到那把已经过期的 sessionKey）
+    saveConnectionConfig({ sessionKey: 'K-B-NEW' });
+    const raw2 = readConfigFile();
+    assert.strictEqual(raw2.sessionKey, 'K-B-NEW');
+    assert.strictEqual(raw2.accounts[rB.key].sessionKey, 'K-B-NEW');
+
+    assert.strictEqual(saveConnectionConfig({ sessionKey: 'K-B-NEW' }).changed, false, '无差异不重写');
+  });
 });
 
 run().then(() => {

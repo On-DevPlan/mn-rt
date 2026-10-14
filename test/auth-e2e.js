@@ -7,7 +7,10 @@
  * WS 注册、属主绑定、路由隔离、会话密钥下发全部只看**本服务自己签的 HS256 设备令牌**，
  * 认证中心只在「第一次换身份」那一跳参与。用同一份 RT_AUTH_JWT_SECRET 在测试里签令牌，
  * 就得到一个不含网络依赖、但走的是完全相同代码路径的场景。
- * （`/auth/verify` 里 verifyBearer 那一跳不在此覆盖，由 server/test/auth.test.js 打桩覆盖。）
+ * 唯一需要认证中心在场的是 `/auth/verify`（verifyBearer 会实时拉发现文档 + userinfo），
+ * 所以那里接一个**本地 OIDC 桩**（见 startIdpStub）——多账号的两条关键契约
+ *（身份预检不产生登记、同一 clientId 换属主必被 403）都发生在这一跳上，
+ * 不能在 e2e 里留空白。
  *
  * 运行：node test/auth-e2e.js
  */
@@ -28,6 +31,56 @@ const URL_WS = `ws://127.0.0.1:${PORT}/ws`;
 const SECRET = 'e2e-shared-secret-do-not-use-in-prod';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * 极小的本地 OIDC 桩：只服务发现文档与 userinfo，供 /auth/verify 走完 verifyBearer。
+ *
+ * 桩不校验签名——它按 Bearer 查一张测试自控的身份表，等价于"认证中心断言了他是谁"。
+ * 覆盖的真实代码路径是：服务端拉发现文档 → 用 Bearer 换身份 → 属主判定 → 签发。
+ */
+function startIdpStub() {
+  const tokens = new Map(); // access_token → userinfo
+  const server = http.createServer((req, res) => {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const path = new URL(req.url, base).pathname;
+    if (path === '/.well-known/openid-configuration') {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+        issuer: base,
+        authorization_endpoint: `${base}/oauth2/auth`,
+        token_endpoint: `${base}/oauth2/token`,
+        userinfo_endpoint: `${base}/oauth2/userinfo`,
+      }));
+      return;
+    }
+    if (path === '/oauth2/userinfo') {
+      const bearer = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+      const who = tokens.get(bearer);
+      res.writeHead(who ? 200 : 401, { 'Content-Type': 'application/json' })
+        .end(JSON.stringify(who || { error: 'invalid_token' }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve({
+        issuer: `http://127.0.0.1:${server.address().port}`,
+        /** 发一枚"认证中心令牌"：本桩按 bearer 查表给出身份，不做签名校验。 */
+        issue(user) {
+          const tok = `idp-tok-${user.sub}-${Math.random().toString(36).slice(2, 10)}`;
+          tokens.set(tok, {
+            sub: user.sub,
+            email: user.email || '',
+            preferred_username: user.username || '',
+            name: user.name || '',
+          });
+          return tok;
+        },
+        close() { try { server.close(); } catch { /* ignore */ } },
+      });
+    });
+  });
+}
 
 /** 与服务端同密钥的离签器：payload 形状必须与 issueDeviceToken 一致。 */
 const signer = new AuthHub({
@@ -122,12 +175,14 @@ async function waitHealth(timeoutMs = 15000) {
 
 async function withServer(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rt-auth-e2e-'));
+  // 认证中心桩必须先于 server 起来：server 启动时会预热发现文档
+  const idp = await startIdpStub();
   const child = spawn(process.execPath, ['src/server.js', '--port', String(PORT), '--log-level', 'error'], {
     cwd: path.join(__dirname, '..', 'server'),
     env: {
       ...process.env,
       RT_AUTH_ENABLED: '1',
-      RT_AUTH_ISSUER: 'http://idp.invalid',
+      RT_AUTH_ISSUER: idp.issuer,
       RT_AUTH_CLIENT_ID: 'mn-rt',
       RT_AUTH_JWT_SECRET: SECRET,
       RT_AUTH_DEVICE_FILE: path.join(dir, 'devices.json'),
@@ -139,9 +194,10 @@ async function withServer(fn) {
   child.stderr.on('data', (c) => { stderr += c; });
   try {
     await waitHealth();
-    await fn(dir);
+    await fn(dir, idp);
   } finally {
     child.kill();
+    idp.close();
     await sleep(150);
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows 偶发 EBUSY，交给系统临时区 */ }
     if (stderr.trim() && process.env.RT_E2E_VERBOSE) console.log('  [server stderr]\n' + stderr);
@@ -163,7 +219,7 @@ async function t(name, fn) {
 async function main() {
   console.log('\n== mn-rt 统一登录端到端（RT_AUTH_ENABLED=1，离线）==\n');
 
-  await withServer(async () => {
+  await withServer(async (dir, idp) => {
     // ---------- 1. 门禁：没有设备令牌什么都做不了 ----------
     await t('无 deviceToken 的 register 被关闭 4401', async () => {
       const c = await rawConn();
@@ -342,6 +398,121 @@ async function main() {
       const r = await req('GET', '/clients');
       assert.ok(r.status === 401 || r.status === 403, `期望 401/403，实到 ${r.status}: ${r.raw}`);
       assert.ok(!r.raw.includes('pc-alice'), '未认证响应里不得出现别人的 clientId');
+    });
+
+    // ---------- 5. 同一台电脑、多个账号 ----------
+    // 这是 CLI 多账号方案依赖的服务端契约：clientId→属主 永久一对一（改绑被拒），
+    // 以及"不带 clientId 的 verify 只回答身份、不产生登记"——CLI 靠它先探明这次
+    // 浏览器登录的是谁，再决定沿用原 clientId 还是领一个新的。
+    const PC_X = 'pc-shared-x';
+    const PC_Y = 'pc-shared-y';
+    const aliceTok = idp.issue({ sub: 'shared-alice', email: 'shared-alice@e2e.test', name: 'Alice' });
+    const bobTok = idp.issue({ sub: 'shared-bob', email: 'shared-bob@e2e.test', name: 'Bob' });
+    let sharedKeyA = null;
+    let sharedTokenA = null;
+    let sharedTokenB = null;
+
+    await t('账号 A 用 clientId pc-shared-x 登记 → 设备令牌 + 会话密钥', async () => {
+      const r = await req('POST', '/auth/verify', {
+        body: { clientId: PC_X, deviceName: '共用的书房电脑' }, token: aliceTok,
+      });
+      assert.strictEqual(r.status, 200, r.raw);
+      assert.strictEqual(r.json.userId, 'shared-alice');
+      assert.strictEqual(r.json.device.owner, 'shared-alice');
+      assert.ok(r.json.token && r.json.sessionKey, '设备令牌与会话密钥都要下发');
+      sharedKeyA = r.json.sessionKey;
+      sharedTokenA = r.json.token;
+    });
+
+    await t('账号 B 拿同一个 clientId 登记 → 403 device_owned_by_other，不泄露 A 的密钥', async () => {
+      const r = await req('POST', '/auth/verify', {
+        body: { clientId: PC_X, deviceName: '共用的书房电脑' }, token: bobTok,
+      });
+      assert.strictEqual(r.status, 403, `同一 clientId 改绑属主必须被拒，实到 ${r.status}: ${r.raw}`);
+      assert.strictEqual(r.json.error, 'device_owned_by_other');
+      assert.ok(!r.raw.includes(sharedKeyA), '被拒的响应绝不能带上真属主的会话密钥');
+    });
+
+    await t('身份预检（不带 clientId）→ 只回答身份，不产生任何设备登记', async () => {
+      const pre = await req('POST', '/auth/verify', { body: {}, token: bobTok });
+      assert.strictEqual(pre.status, 200, pre.raw);
+      assert.strictEqual(pre.json.userId, 'shared-bob', '先知身份、再选 clientId——多账号就靠这一跳');
+      assert.ok(pre.json.token, '预检同样发一枚用户令牌（用完即弃）');
+      assert.ok(!pre.json.device && !pre.json.sessionKey, '预检不得登记设备、也不该下发密钥');
+      // A 的记录一个字节都没被动过：再验一次，还是那把密钥
+      const again = await req('POST', '/auth/verify', { body: { clientId: PC_X }, token: aliceTok });
+      assert.strictEqual(again.status, 200);
+      assert.strictEqual(again.json.sessionKey, sharedKeyA, '预检不能碰到别人的登记记录');
+    });
+
+    await t('账号 B 换一个自己的 clientId → 登记成功，两台"电脑"各持各的密钥', async () => {
+      const r = await req('POST', '/auth/verify', {
+        body: { clientId: PC_Y, deviceName: '共用的书房电脑' }, token: bobTok,
+      });
+      assert.strictEqual(r.status, 200, r.raw);
+      assert.strictEqual(r.json.device.owner, 'shared-bob');
+      assert.notStrictEqual(r.json.sessionKey, sharedKeyA, '每个 clientId 一把独立会话密钥');
+      sharedTokenB = r.json.token;
+    });
+
+    await t('客户端真代码 verifyExchange：成功形状与 403 形状都能对出来', async () => {
+      // 用 CLI 自己的实现（client/lib/auth.js）打这台服务器，而不是在测试里重写一遍
+      const { verifyExchange } = require('../client/lib/auth');
+      const base = `http://127.0.0.1:${PORT}`;
+      const ok = await verifyExchange({
+        serverHttp: base, accessToken: aliceTok, clientId: PC_X, deviceName: '共用的书房电脑',
+      });
+      assert.strictEqual(ok.userId, 'shared-alice');
+      assert.ok(ok.token && ok.sessionKey, '归一化结果里要有令牌与会话密钥');
+      assert.strictEqual(ok.serverHttp, base);
+      await assert.rejects(
+        () => verifyExchange({ serverHttp: base, accessToken: bobTok, clientId: PC_X }),
+        (e) => e.code === 'device_owned_by_other',
+        '复用别人的 clientId 必须抛 device_owned_by_other（CLI 靠它决定换新 id）',
+      );
+    });
+
+    await t('两个 clientId 各自 register 成 pc；重连回到各自那把密钥', async () => {
+      const cA = await rawConn();
+      const cB = await rawConn();
+      try {
+        cA.send({ type: 'register', role: 'pc', clientId: PC_X, deviceToken: sharedTokenA, deviceName: '共用的书房电脑' });
+        const ackA = await cA.waitFor((m) => m.type === 'registered');
+        assert.strictEqual(ackA.device.owner, 'shared-alice');
+        assert.strictEqual(ackA.sessionKey, sharedKeyA);
+
+        cB.send({ type: 'register', role: 'pc', clientId: PC_Y, deviceToken: sharedTokenB, deviceName: '共用的书房电脑' });
+        const ackB = await cB.waitFor((m) => m.type === 'registered');
+        assert.strictEqual(ackB.device.owner, 'shared-bob');
+        assert.notStrictEqual(ackB.sessionKey, ackA.sessionKey, '两台设备的密钥必须彼此独立');
+
+        // 切走再切回来（= CLI auth switch 后再起 serve）：仍是原来那把，手机端缓存的密钥继续有效
+        const cA2 = await rawConn();
+        try {
+          cA2.send({ type: 'register', role: 'pc', clientId: PC_X, deviceToken: sharedTokenA, sessionKey: sharedKeyA });
+          const ackA2 = await cA2.waitFor((m) => m.type === 'registered');
+          assert.strictEqual(ackA2.sessionKey, sharedKeyA);
+        } finally { cA2.dispose(); }
+      } finally { cA.dispose(); cB.dispose(); }
+    });
+
+    await t('多账号不改变隔离：B 的手机推不到 A 那台（跨属主仍 forbidden）', async () => {
+      const cA = await rawConn();
+      const phoneB = await rawConn();
+      try {
+        cA.send({ type: 'register', role: 'pc', clientId: PC_X, deviceToken: sharedTokenA });
+        await cA.waitFor((m) => m.type === 'registered');
+        cA.inbox.length = 0; // 登记回执不算“收到的注入帧”，清掉再看有没有越权投递
+        const bobPhone = signer.issueDeviceToken({ userId: 'shared-bob', clientId: '', deviceName: 'phone' });
+        phoneB.send({ type: 'register', role: 'phone', phoneId: 'phone-shared-bob', deviceToken: bobPhone.token });
+        await phoneB.waitFor((m) => m.type === 'registered');
+
+        phoneB.send({ clientId: PC_X, text: '越权注入' });
+        const res = await phoneB.waitFor((m) => m.status === 'forbidden' || m.clientId === PC_X, 4000);
+        assert.strictEqual(res.status, 'forbidden', JSON.stringify(res));
+        await sleep(250);
+        assert.strictEqual(cA.inbox.length, 0, 'A 那台一条帧都不该收到');
+      } finally { cA.dispose(); phoneB.dispose(); }
     });
   });
 

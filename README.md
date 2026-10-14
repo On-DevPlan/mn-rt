@@ -42,6 +42,11 @@ npx nx-rt                                           # 之后裸命令直连，�
 npx nx-rt auth status                               # 我是谁 / 令牌还剩多久 / 本机登记上了吗
 npx nx-rt auth login --url ws://<自建服务器>:8790/ws # 连自己部署的那台
 
+# ── 多人共用同一台电脑：各登各的账号，随时切换 ──
+npx nx-rt auth login                                # 再来一次，换个人在浏览器里登他的账号
+npx nx-rt auth list                                 # 本机已存哪些账号、当前用的是哪个
+npx nx-rt auth switch <序号|邮箱|用户名>              # 换人用这台电脑 = 换一条命令（重启 serve 生效）
+
 # ── 旧路径：手动配对 key（服务器未开启统一登录时唯一可用）──
 npx nx-rt serve                                   # 不传 --key 则自动生成强随机 key 并打印
 npx nx-rt serve --key MYKEY123                    # 两端用同一个 key
@@ -79,7 +84,8 @@ npx nx-rt serve --key MYKEY123                    # 两端用同一个 key
   以及不再需要人手传一个高熵凭据（那条路真实泄露面更大）。
   **不接受这个前提就请把 `RT_AUTH_ENABLED` 关掉**，回到手动配对 key 的严格端到端。
 - 隔离靠的是**属主判定**而不是密钥保密：`/my/devices` 按令牌 `sub` 过滤、
-  注入前比对目标设备属主、`clientId` 已被他人绑定时拒绝改绑、
+  注入前比对目标设备属主、`clientId` 已被他人绑定时拒绝改绑（"同一台电脑多账号"
+  正是绕开改绑的实现——每个账号各持一个 clientId，见上文「多账号共用一台电脑」）、
   设备令牌里的 `cid` 必须与上报的 `clientId` 逐字相等（空 `cid` 的用户令牌注册不成 pc）。
   以上每一条都有 `test/auth-e2e.js` 的离线端到端用例守着。
 - 中转链路为明文 WS（**机密性由端侧加密承担，而端侧密钥在服务端手里**）——
@@ -200,16 +206,53 @@ npx nx-rt        # 等价 serve，用最后一次成功连接的参数
 ```
 
 key 会随配置一起保存——重启用同一 key，手机端无需重新配对。配置文件含凭据，勿提交仓库或外传。
-`npx nx-rt auth logout` 只清统一登录产物，不动旧的 `--key` / `--token` 配置。
+`npx nx-rt auth logout` 只清**当前账号**的登录产物（其余账号原样留着），
+`--all` 才清空本机全部账号；两者都不动旧的 `--key` / `--token` 配置。
 
 首次运行会自动生成并持久化 `clientId`（存于 `~/.nx-rt/client-id`），用于服务端按目标路由。
+
+### 多账号共用一台电脑
+
+服务端注册表是 `clientId → 属主` 的**永久一对一**绑定，换属主一律拒绝（`/auth/verify`
+403 `device_owned_by_other`、WS register 关闭码 4403），也没有解绑途径。所以"一台电脑
+多账号"不走改绑，而是**每个账号各持一个 clientId**：
+
+```bash
+npx nx-rt auth login          # 第一个人登录 → 绑定本机最初的 clientId
+npx nx-rt auth login          # 第二个人在浏览器里登自己的账号 → 自动领一个新 clientId
+npx nx-rt auth list           # 两个账号都在，各自一个 clientId + 一把会话密钥
+npx nx-rt auth switch 2       # 切到第二个账号（序号 / 邮箱 / 用户名 / 昵称都认）
+npx nx-rt                     # 按切换后的账号连接；手机端各自登录只看到自己名下那台
+npx nx-rt serve --account bob # 或者临时以某个账号连接，不改动本机激活账号
+```
+
+要点：
+
+- 登录时会先做一次**身份预检**（不带 clientId 换用户令牌，服务端不产生任何登记），
+  知道浏览器里登的是谁之后才决定沿用原 clientId（同账号重登，绑定与会话密钥不变）
+  还是领新 clientId（新账号）。因此第二个账号**不会再撞 403**。
+- `~/.nx-rt/config.json` 里 `accounts` 表是账号簿，flat 字段（`deviceToken` /
+  `sessionKey` / `clientId` / `authUser` …）永远是**当前激活账号**的镜像——
+  老版本客户端读到这份配置会忽略新字段、照 flat 正常工作（降级安全）。
+- `auth switch` 只改本机状态，**正在跑的 serve 不会自动换账号**：Ctrl+C 结束它再起。
+- 一台电脑**同时只跑一个 serve**——两个账号的 serve 会争抢同一个物理键盘。
+- `auth logout` 之后重新登录同一个账号：本机**还存着别的账号**时会领到**新的 clientId**
+  （本机账号表空了则仍沿用机器默认标识，绑定不变）。前一种情况旧记录留在服务端注册表里，
+  无害但不会自动消失——想保留原绑定就别 logout，直接 `auth switch` 切回来。
+- 一台机器别混用两个客户端版本：老版本的 CLI 只认 flat 字段，它做的登录/登出不会同步
+  账号表，两边混着跑会把状态写岔。
+- 隔离照旧：每个 clientId 仍只属于一个属主，跨属主注入一律 `forbidden`，
+  多账号只是"一台机器上并存多个各自独立的设备身份"。
 
 常用参数：
 
 ```bash
 npx nx-rt auth login                   # 统一登录（弹浏览器）
+npx nx-rt auth list                    # 本机已存账号一览（当前账号带 *）
+npx nx-rt auth switch <账号>            # 切换当前账号（不带参数给编号选择器）
 npx nx-rt auth status                  # 我是谁 / 令牌剩余有效期 / 本机是否已登记
-npx nx-rt auth logout                  # 清除本机登录凭据
+npx nx-rt auth logout [--all]          # 清除当前账号凭据（--all 清空全部账号）
+npx nx-rt serve --account <账号>        # 本次以指定账号连接，不改激活账号
 npx nx-rt serve --url <ws-url> --client-id <id> --log-level debug
 npx nx-rt serve --key MYKEY123         # 两端用同一个 key（旧手动配对）
 npx nx-rt serve --device-name 书房电脑 # 手机端「我的电脑」里显示的名字

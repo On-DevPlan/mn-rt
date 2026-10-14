@@ -11,6 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { resolveTarget } = require('./platform');
+const accountsLib = require('./accounts');
 
 /**
  * 内置默认公网服务地址（用户可用 --url 或环境变量覆盖）。
@@ -105,15 +106,121 @@ function readConfigFile() {
 }
 
 /**
- * 保存本次成功连接使用的连接参数（url / alignKey / token）到配置文件，
+ * 原子写整份配置文件：同目录 tmp（0600）→ fsync → rename。
+ *
+ * 为什么必须整份原子替换：写入方已经不止一个了——长期运行的 serve 会在
+ * 「registered 登记成功」与「服务端下发会话密钥」两个时机回写配置，而用户随时可能在
+ * 另一个终端跑 auth login。非原子的半截文件会被下一次合并读（readConfigFile 解析失败
+ * 返回 {}）当成空配置，等于把凭据静默清空。
+ *
+ * 明确**没有**跨进程互斥：两个写入方各自「读—合并—整份替换」，交错时后写的一方
+ * 覆盖前一方（last-write-wins）。文件名带 pid，所以至少不会两方共写同一个 tmp。
+ * 这是可接受的：可能丢的只是 serve 回写的 sessionKey/url，而 sessionKey 在下次
+ * register 时会由服务端重新下发（registered 帧）自愈；反过来为一份配置上锁，
+ * 会把复杂度加在所有路径上，不划算。
+ *
+ * rename 在 Windows 上可能被扫描器/索引器占住（EPERM/EBUSY），所以带几次短重试；
+ * 仍然失败就抛错——调用方（serve 的回写路径）必须自己兜住，不能让一次写盘抖动
+ * 打死一个健康的 serve。
+ * @param {object} nextRaw 将要落盘的完整配置对象
+ * @returns {{file: string}}
+ */
+function writeConfigFile(nextRaw) {
+  const file = configFile();
+  fs.mkdirSync(configDir(), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  let fd = null;
+  try {
+    // 0600 建 tmp：rename 之后到 chmod 之前有个窗口，别让别的用户读到令牌
+    fd = fs.openSync(tmp, 'w', 0o600);
+    fs.writeFileSync(fd, `${JSON.stringify(nextRaw, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(fd); // 断电也不留半截文件（rename 只保证"要么旧的、要么完整的新的"）
+    fs.closeSync(fd);
+    fd = null;
+    renameWithRetry(tmp, file);
+  } catch (e) {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+    try { fs.unlinkSync(tmp); } catch { /* 清理失败无所谓 */ }
+    throw e;
+  }
+  if (process.platform !== 'win32') {
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {
+      // 权限收紧失败不阻断：文件在用户自己的配置目录里
+    }
+  }
+  return { file };
+}
+
+/** rename 覆盖已存在的文件在 Windows 上可能撞上 EPERM/EBUSY（杀软扫描、索引器）。 */
+function renameWithRetry(from, to) {
+  let lastErr = null;
+  for (let i = 0; i < 4; i += 1) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (e.code !== 'EPERM' && e.code !== 'EBUSY' && e.code !== 'EACCES') throw e;
+      // 忙等几毫秒：这类占用都是瞬时的
+      const until = Date.now() + 20;
+      while (Date.now() < until) { /* spin */ }
+    }
+  }
+  throw lastErr;
+}
+
+/** 运行期会被服务端纠正/更新的字段（回写账号条目时只动这些）。 */
+const RUN_PATCH_KEYS = ['url', 'sessionKey', 'serverHttp', 'deviceName'];
+
+/** 把运行期字段并进条目（不动身份字段）。 */
+function patchEntry(entry, relevant) {
+  const patch = {};
+  for (const k of RUN_PATCH_KEYS) if (relevant[k]) patch[k] = relevant[k];
+  return accountsLib.mergeEntryFields(entry, patch);
+}
+
+/**
+ * 条目必须有非空 clientId 才能落盘。
+ *
+ * 为什么是硬要求：flat 的 clientId 是"当前账号的本机标识"，而
+ * buildFlatSyncPatch 会跳过空值——条目 clientId 一旦为空，切换账号时 flat 就会
+ * **留着上一个账号的 clientId**，于是拿 A 的设备令牌配 B 的标识去注册
+ * （4401 token_client_mismatch）。老配置迁移出来的条目正是这种情况（0.5.x 从不写
+ * flat clientId），所以这里用机器默认标识兜底，保证条目一落地就自洽。
+ */
+function entryWithClientId(entry, relevant, existing) {
+  if (entry.clientId) return entry;
+  return {
+    ...entry,
+    clientId: relevant.clientId || existing.clientId || ensureClientId(),
+  };
+}
+
+/**
+ * 保存本次成功连接使用的连接参数（url / alignKey / token / 统一登录产物）到配置文件，
  * 作为下次运行的默认值——「最后一次成功连接 = 下次默认」。
  *
  * 只写传入对象里的非空字段（未携带的字段保留文件里已有的值，绝不抹掉）；
  * 与文件现状无差异时不重写。合并写入，文件里其他字段原样保留。
- * @param {object} cfg loadConfig 产物（读 url/alignKey/token 字段）
+ *
+ * 多账号下的两条路径（不变式：flat 字段永远镜像 active 账号）：
+ *   - 本次运行的账号 == active（或没传 accountKey）：写 flat，**并**把运行期字段
+ *     回写进该账号条目——否则条目里的 sessionKey 会停在旧值，之后切走再切回来
+ *     就要拿一把陈旧密钥去解密；
+ *   - 本次运行的账号 != active（serve --account 跑的是别人账号）：只写那个条目，
+ *     flat 一个字节都不动，"当前激活账号"的镜像关系不被破坏。
+ *
+ * 老配置（文件里**还没有** accounts 表）只写 flat，绝不凭空生成账号表：
+ * 这样"升级后第一次裸跑 serve"的行为与从前逐字节一致，注册与回写都不变。
+ * 账号表只由 auth login / auth switch 这些显式动作建立。
+ *
+ * @param {object} cfg loadConfig 产物（读 url/alignKey/token/… 字段）
+ * @param {{accountKey?: string}} [opts] 本次运行所属账号的 key
  * @returns {{changed: boolean, file: string}}
  */
-function saveConnectionConfig(cfg) {
+function saveConnectionConfig(cfg, opts = {}) {
   const relevant = {};
   if (cfg.url) relevant.url = cfg.url;
   if (cfg.alignKey) relevant.alignKey = cfg.alignKey;
@@ -125,46 +232,189 @@ function saveConnectionConfig(cfg) {
   if (cfg.deviceName) relevant.deviceName = cfg.deviceName;
   if (cfg.authUser) relevant.authUser = cfg.authUser;
   if (cfg.serverHttp) relevant.serverHttp = cfg.serverHttp;
+  // clientId 同样要落 flat：切换账号后它就是"当前账号的本机标识"，
+  // 不写就会退回机器默认 id → WS register 4401 token_client_mismatch。
+  if (cfg.clientId) relevant.clientId = cfg.clientId;
 
   const file = configFile();
   const existing = readConfigFile();
-  const changed = Object.keys(relevant).some((k) => existing[k] !== relevant[k]);
-  if (!changed) return { changed: false, file };
 
-  fs.mkdirSync(configDir(), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify({ ...existing, ...relevant }, null, 2)}\n`, 'utf8');
-  if (process.platform !== 'win32') {
-    try {
-      fs.chmodSync(file, 0o600);
-    } catch {
-      // 权限收紧失败不阻断：文件在用户自己的配置目录里
+  // 只有文件里**已经有** accounts 表时才谈"哪个账号"：老配置一次都不该被我们
+  // 悄悄升级成账号表（升级动作只发生在 auth login / auth switch）。
+  const persistedAccounts = (existing.accounts && typeof existing.accounts === 'object')
+    ? existing.accounts : null;
+  const hasTable = Boolean(persistedAccounts && Object.keys(persistedAccounts).length > 0);
+
+  let next;
+  if (!hasTable) {
+    next = { ...existing, ...relevant };
+  } else {
+    const view = accountsLib.withAccounts(existing, { defaultClientId: ensureClientId() });
+    const runKey = opts.accountKey || null;
+    // 本次运行的账号已经被删掉了（另一个终端 auth logout / logout --all）：
+    // 一个字都不写。否则 serve 的这次回写会把刚登出的凭据又写回 flat，
+    // 于是"账号表空了但 flat 显示已登录"，两台机器看到的登录态直接打架。
+    if (runKey && !view.accounts[runKey]) return { changed: false, file };
+    // 注意 targetKey 只从**有表**的现状里挑：--account 指定的账号，或文件里的激活账号。
+    // 本次运行的账号必须由调用方在启动时就定下来（cmdServe 会传），不能在这里
+    // 按"当前激活"重新解析——那样 serve 跑着的时候另一个终端切了账号，
+    // 这次回写就会写进**别人的**条目，还会把别人的 flat 一起改掉。
+    const targetKey = runKey && view.accounts[runKey]
+      ? runKey
+      : (view.activeAccountKey && view.accounts[view.activeAccountKey] ? view.activeAccountKey : null);
+
+    if (targetKey && view.activeAccountKey !== targetKey) {
+      // 借用的**别人账号**（serve --account）：只写它自己的条目。
+      // flat 是"当前激活账号"的镜像，这里一个字节都不能动——否则别人的 url/key
+      // 会渗进激活账号，下次裸跑 serve 就连错了账号。
+      next = {
+        ...existing,
+        accounts: { ...persistedAccounts, ...view.accounts, [targetKey]: entryWithClientId(patchEntry(view.accounts[targetKey], relevant), relevant, existing) },
+      };
+    } else {
+      next = { ...existing, ...relevant };
+      if (targetKey) {
+        // 激活账号：条目与 flat 一起更新（只写 flat 的话，切走再切回来会拿到旧 sessionKey）
+        const merged = entryWithClientId(patchEntry(view.accounts[targetKey], relevant), relevant, existing);
+        next.accounts = { ...persistedAccounts, ...view.accounts, [targetKey]: merged };
+        next.activeAccount = targetKey; // 指针缺失时顺手补上（否则 auth logout 找不到"当前账号"）
+        Object.assign(next, accountsLib.buildFlatSyncPatch(merged));
+      }
     }
   }
+
+  if (JSON.stringify(existing) === JSON.stringify(next)) return { changed: false, file };
+  writeConfigFile(next);
   return { changed: true, file };
 }
 
+/** 登出时要一并抹掉的 flat 凭据（多账号下还包含 clientId——它属于那个账号）。 */
+const FLAT_AUTH_KEYS = ['deviceToken', 'sessionKey', 'authUser', 'clientId'];
+
 /**
- * 登出：抹掉统一登录产物（设备令牌 / 会话密钥 / 身份快照）。
+ * 登出。
  *
- * 刻意**不动** `alignKey` 与 `token`——那是老的"人手传配对 key / RT_TOKEN"路径，
- * 与统一登录并存，logout 不应该顺手把人家的旧配置清了。
- * @returns {{changed: boolean, file: string}}
+ *   - 默认（多账号）：只清**当前激活**那一个账号——删它的条目、清 flat 凭据、
+ *     摘掉 activeAccount 指针；其余账号原样保留，但**不自动接任**新账号
+ *     （静默换成另一个人的身份比"多敲一条命令"危险得多）。清完就是"未登录"态。
+ *   - `{all: true}`：清空整张账号表（本机彻底退出统一登录）。
+ *
+ * 两条路都刻意**不动** `alignKey` 与 `token`——那是老的"人手传配对 key / RT_TOKEN"
+ * 路径，与统一登录并存，logout 不应该顺手把人家的旧配置清了。
+ * 老配置（无 accounts 表）行为与从前逐字节一致。
+ * @param {{all?: boolean}} [opts]
+ * @returns {{changed: boolean, file: string, remaining: number}}
  */
-function clearAuthCredentials() {
+function clearAuthCredentials(opts = {}) {
   const file = configFile();
   const existing = readConfigFile();
-  const keys = ['deviceToken', 'sessionKey', 'authUser'];
-  const changed = keys.some((k) => existing[k] !== undefined);
-  if (!changed) return { changed: false, file };
+  const hadFlat = FLAT_AUTH_KEYS.some((k) => existing[k] !== undefined);
+  const hadMap = existing.accounts !== undefined || existing.activeAccount !== undefined;
 
-  const next = { ...existing };
-  for (const k of keys) delete next[k];
-  fs.mkdirSync(configDir(), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
-  if (process.platform !== 'win32') {
-    try { fs.chmodSync(file, 0o600); } catch { /* 不阻断 */ }
+  if (opts.all) {
+    if (!hadFlat && !hadMap) return { changed: false, file, remaining: 0 };
+    const next = { ...existing };
+    for (const k of [...FLAT_AUTH_KEYS, 'accounts', 'activeAccount']) delete next[k];
+    writeConfigFile(next);
+    return { changed: true, file, remaining: 0 };
   }
-  return { changed: true, file };
+
+  const view = accountsLib.withAccounts(existing, { defaultClientId: ensureClientId() });
+  const activeKey = view.activeAccountKey;
+  const next = { ...existing };
+  let removed = false;
+  if (activeKey && view.accounts[activeKey]) {
+    // 起点是**文件里原样的表**：手改坏的条目原样留着，不因为我们看不懂就删掉
+    const rest = { ...(existing.accounts || {}), ...view.accounts };
+    delete rest[activeKey];
+    removed = true;
+    if (Object.keys(rest).length > 0) next.accounts = rest;
+    else delete next.accounts; // 老配置登出后不该凭空多出一个空 accounts 表
+    delete next.activeAccount;
+  }
+  for (const k of FLAT_AUTH_KEYS) delete next[k];
+
+  // 只有真的删掉了一个条目、或真的清掉了 flat 凭据，才算改动；
+  // "存在 accounts 表"本身不是改动——否则登出会永远报"已清除"且每次重写文件。
+  if (!hadFlat && !removed) return { changed: false, file, remaining: next.accounts ? Object.keys(next.accounts).length : 0 };
+  writeConfigFile(next);
+  return { changed: true, file, remaining: next.accounts ? Object.keys(next.accounts).length : 0 };
+}
+
+/**
+ * 记下一个账号的完整登录态并（可选）激活它——`auth login` 的落盘入口。
+ *
+ * 惰性迁移在这里固化：老配置里的 flat 凭据会由 withAccounts 合成为首个条目，
+ * 于是"第二个人登录"不会把第一个人的登录态挤掉。
+ * @param {{entry: object, setActive?: boolean}} args
+ * @returns {{changed: boolean, key: string, file: string}}
+ */
+function saveAuthAccount({ entry, setActive = true }) {
+  const file = configFile();
+  const existing = readConfigFile();
+  // 迁移播种必须用**机器默认标识**（ensureClientId），不能用本次登录账号的
+  // clientId：老配置里没有 flat clientId，拿新账号的 id 去播种会让两个账号共用
+  // 同一个标识——老账号之后既登不回来（服务端 403），切过去也注册不上（4401）。
+  const view = accountsLib.withAccounts(existing, { defaultClientId: ensureClientId() });
+  const key = accountsLib.entryKeyOf(entry);
+  const entryWithId = entry.clientId ? { ...entry } : { ...entry, clientId: ensureClientId() };
+  const accounts = {
+    ...(existing.accounts && typeof existing.accounts === 'object' ? existing.accounts : {}),
+    ...view.accounts,
+    [key]: entryWithId,
+  };
+  const next = { ...existing, accounts };
+  if (setActive) {
+    next.activeAccount = key;
+    Object.assign(next, accountsLib.buildFlatSyncPatch(accounts[key]));
+  }
+  if (JSON.stringify(existing) === JSON.stringify(next)) return { changed: false, key, file };
+  writeConfigFile(next);
+  return { changed: true, key, file };
+}
+
+/**
+ * 切换激活账号：设指针 + 把该账号的条目打平成 flat
+ * （deviceToken / sessionKey / **clientId** / serverHttp / url / deviceName / authUser）。
+ * 跨部署切换时 url/serverHttp 必须一起走，否则会拿 A 服务器的令牌去连 B。
+ * @param {string} target 序号 / 邮箱 / 用户名 / 昵称 / 完整 key
+ * @param {{defaultClientId?: string}} [opts]
+ * @returns {{changed: boolean, key: string, entry: object, file: string}}
+ * @throws {Error} 目标找不到或有歧义时抛出（message 已含候选清单）
+ */
+function switchActiveAccount(target, opts = {}) {
+  const file = configFile();
+  const existing = readConfigFile();
+  const { key, entry } = accountsLib.resolveAccountEntry(existing, target, opts);
+  // 老配置迁移出来的条目可能没有 clientId；缺了就补机器默认标识并写回条目，
+  // 否则 flat 会保留**上一个账号**的 clientId（正是 4401 那类故障）。
+  const fixed = entry.clientId ? entry : { ...entry, clientId: existing.clientId || ensureClientId() };
+  const accounts = { ...(existing.accounts || {}), [key]: fixed };
+  const next = {
+    ...existing, accounts, activeAccount: key, ...accountsLib.buildFlatSyncPatch(fixed),
+  };
+  if (JSON.stringify(existing) === JSON.stringify(next)) {
+    return { changed: false, key, entry: fixed, file };
+  }
+  writeConfigFile(next);
+  return { changed: true, key, entry: fixed, file };
+}
+
+/**
+ * 按「主机名-6 位随机」生成一个 clientId（不落盘）。
+ * @param {Set<string>|string[]} [exclude] 需要避让的 id（同一台机器上的其他账号）
+ *   服务端 clientId→属主 是永久一对一，复用已登记的标识会直接 403
+ *   device_owned_by_other，所以多账号下每个账号必须领一个自己的标识。
+ */
+function generateClientId(exclude) {
+  const host = (os.hostname() || 'pc').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 20);
+  const skip = exclude instanceof Set ? exclude : new Set(exclude || []);
+  let id = '';
+  for (let i = 0; i < 20; i += 1) {
+    id = `${host}-${Math.random().toString(36).slice(2, 8)}`;
+    if (!skip.has(id)) return id;
+  }
+  return id; // 36^6 空间里连撞 20 次的概率可忽略；真发生也照常返回，不阻断登录
 }
 
 /** 生成/持久化 clientId：首次运行按 主机名-随机串 生成并落盘，保证稳定路由。 */
@@ -178,9 +428,7 @@ function ensureClientId() {
     }
   } catch { /* 忽略，继续生成 */ }
 
-  const host = (os.hostname() || 'pc').toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 20);
-  const rand = Math.random().toString(36).slice(2, 8);
-  const id = `${host}-${rand}`;
+  const id = generateClientId();
   try {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(file, id, 'utf8');
@@ -353,9 +601,13 @@ module.exports = {
   configDir,
   configFile,
   ensureClientId,
+  generateClientId,
   readConfigFile,
+  writeConfigFile,
   migrateLegacyConfigDir,
   saveConnectionConfig,
+  saveAuthAccount,
+  switchActiveAccount,
   clearAuthCredentials,
   resolveEnterMode,
   httpBaseFromWs,

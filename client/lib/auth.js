@@ -9,6 +9,8 @@
  *   ③ 用户在认证中心登录 → 302 回本机监听 → 拿到 code
  *   ④ 用 code + verifier 直接在**认证中心**换 access_token（公共客户端，无 secret）
  *   ⑤ 带 Bearer 调 <server>/auth/verify → 换回本服务的设备令牌 + 会话密钥
+ *      （多账号时先裸体调一次做**身份预检**，拿到身份再决定用哪个 clientId 登记：
+ *        同账号沿用原标识，新账号领新标识——服务端的 clientId→属主 是永久一对一的）
  *   ⑥ 落盘到配置文件，之后 `serve` 静默携带
  *
  * ── 为什么第 ④ 步由 CLI 自己换、而不是把 code 交给服务端换 ──────────────
@@ -202,6 +204,48 @@ function getJson(urlStr, headers = {}) {
 }
 
 /**
+ * 拿认证中心的 access_token 换本服务的令牌（POST /auth/verify），并归一化返回值。
+ *
+ * **clientId 缺省时是"身份预检"**：服务端只签发用户令牌（cid=''），
+ * 不登记任何设备、不产生任何服务端状态，纯粹回答"这次登录的是谁"。
+ * 多账号就靠这一跳先探明身份，再决定用哪个 clientId 去正式登记。
+ *
+ * @param {{serverHttp:string, accessToken:string, clientId?:string, deviceName?:string}} args
+ * @returns {Promise<object>} 归一化结果（含 token / userId / sessionKey / device）
+ * @throws {Error} 服务端拒绝时抛出；错误码放在 err.code（如 device_owned_by_other）
+ */
+async function verifyExchange({ serverHttp, accessToken, clientId, deviceName }) {
+  const base = String(serverHttp || '').replace(/\/+$/, '');
+  const body = {};
+  if (clientId) body.clientId = clientId;
+  // 空 deviceName 不必发送：服务端 deviceName 的兜底链是
+  // `deviceName || prev.deviceName || clientId`，省略与空串等价。
+  if (deviceName) body.deviceName = deviceName;
+
+  const res = await postJson(`${base}/auth/verify`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body,
+  });
+  const j = res.json || {};
+  if (!res.status || res.status >= 400 || !j.ok || !j.token) {
+    const err = new Error(`服务端拒绝签发令牌：${j.message || j.error || `HTTP ${res.status}`}`);
+    err.code = j.error || `http_${res.status}`;
+    throw err;
+  }
+  return {
+    token: j.token,
+    tokenExpiresAt: j.tokenExpiresAt,
+    userId: j.userId,
+    email: j.email || '',
+    username: j.username || '',
+    nickname: j.nickname || '',
+    sessionKey: j.sessionKey || '',
+    device: j.device || null,
+    serverHttp: base,
+  };
+}
+
+/**
  * 完整登录一次。
  * @param {object} opts
  * @param {string} opts.serverHttp  服务端 HTTP 基址，如 http://1.94.101.189:8790
@@ -209,6 +253,10 @@ function getJson(urlStr, headers = {}) {
  * @param {string} [opts.deviceName]
  * @param {boolean} [opts.noOpen]   只打印地址不弹浏览器（SSH / 无桌面环境）
  * @param {(url:string)=>void} [opts.onUrl]
+ * @param {(identity:object, prevErr:Error|null)=>
+ *   Promise<{clientId:string, deviceName?:string, retryOnOwnedByOther?:boolean}>} [opts.resolveClientId]
+ *   多账号回调：拿到身份后决定用哪个 clientId 登记（详见第 ⑤ 步注释）。
+ *   不传时退化为原来的单跳流程，行为逐字节一致。
  */
 async function authLogin(opts) {
   const base = (opts.serverHttp || '').replace(/\/+$/, '');
@@ -267,25 +315,80 @@ async function authLogin(opts) {
   }
 
   // ⑤ 换本服务的设备令牌 + 会话密钥。refresh_token 到此为止：不传、不落盘。
-  const vRes = await postJson(`${base}/auth/verify`, {
-    headers: { Authorization: `Bearer ${tok.access_token}` },
-    body: { clientId: opts.clientId, deviceName: opts.deviceName || '' },
-  });
-  if (!vRes.json || !vRes.json.ok || !vRes.json.token) {
-    throw new Error(`服务端拒绝签发令牌：${vRes.json && (vRes.json.message || vRes.json.error) || `HTTP ${vRes.status}`}`);
+  //
+  // 多账号（给了 resolveClientId）时多一跳**身份预检**：先不带 clientId 换一次
+  // 用户令牌——服务端此时不登记任何设备，只回答"这次登录的是谁"。知道是谁之后，
+  // 才能决定用哪个 clientId 去正式登记：同一账号沿用原标识（只换令牌、绑定与
+  // 会话密钥都不变），新账号领一个新标识。服务端的 clientId→属主 是永久一对一，
+  // 拿别人的标识去登记会被 403 顶回来——所以顺序只能是"先知身份、后选标识"。
+  let decision = null;
+  let res;
+  if (typeof opts.resolveClientId === 'function') {
+    let identity;
+    try {
+      identity = await verifyExchange({ serverHttp: base, accessToken: tok.access_token });
+    } catch (e) {
+      // 保留错误码：调用方可能按 code 分辨"令牌无效"还是"服务端没开统一登录"
+      const err = new Error(`身份预检失败：${e.message}`);
+      err.code = e.code;
+      throw err;
+    }
+    const choose = (prevErr) => opts.resolveClientId(identity, prevErr);
+    decision = (await choose(null)) || {};
+    try {
+      res = await verifyExchange({
+        serverHttp: base,
+        accessToken: tok.access_token,
+        clientId: decision.clientId || opts.clientId,
+        deviceName: decision.deviceName || opts.deviceName,
+      });
+    } catch (e) {
+      // 兜底：老配置被清过、机器默认标识其实早已被别的账号登记 → 换新标识再试一次。
+      // 只对"机器默认标识"这条路生效（retryOnOwnedByOther）。条目复用的路径上撞 403
+      // 意味着服务端状态与本地不一致，必须如实报出来，不能自己换个 id 蒙混过去。
+      if (e.code === 'device_owned_by_other' && decision.retryOnOwnedByOther) {
+        decision = (await choose(e)) || {};
+        res = await verifyExchange({
+          serverHttp: base,
+          accessToken: tok.access_token,
+          clientId: decision.clientId || opts.clientId,
+          deviceName: decision.deviceName || opts.deviceName,
+        });
+      } else {
+        throw e;
+      }
+    }
+  } else {
+    res = await verifyExchange({
+      serverHttp: base,
+      accessToken: tok.access_token,
+      clientId: opts.clientId,
+      deviceName: opts.deviceName,
+    });
   }
 
+  // 交回调用方两样它自己推不出来的东西：
+  //   clientId  —— 这次实际登记的标识（cfg.clientId 未必等于它：新账号领的是新标识）
+  //   deviceName —— 这次实际用的设备名（可能沿用条目里存的那个，不是 cfg.deviceName）
+  // 有 decision 却没 clientId 说明决策链出了岔子：宁可当场炸，也不要静默换回一个
+  // cid='' 的用户令牌（那种令牌永远注册不成 pc）。
+  const usedClientId = (decision && decision.clientId) || opts.clientId || '';
+  if (opts.resolveClientId && !usedClientId) {
+    throw new Error('登录决策没有给出 clientId（内部错误）：请反馈这个现象');
+  }
   return {
-    token: vRes.json.token,
-    tokenExpiresAt: vRes.json.tokenExpiresAt,
-    userId: vRes.json.userId,
-    email: vRes.json.email || '',
-    username: vRes.json.username || '',
-    nickname: vRes.json.nickname || '',
-    sessionKey: vRes.json.sessionKey || '',
-    device: vRes.json.device || null,
-    serverHttp: base,
+    ...res,
+    clientId: usedClientId,
+    deviceName: (decision && decision.deviceName) || opts.deviceName || '',
   };
 }
 
-module.exports = { authLogin, getJson, postJson, createAuthRequest, openLoopback, openBrowserArgs };
+module.exports = {
+  authLogin,
+  verifyExchange,
+  getJson,
+  postJson,
+  createAuthRequest,
+  openLoopback,
+  openBrowserArgs,
+};

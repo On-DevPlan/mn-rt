@@ -9,7 +9,8 @@
  *   remotetype serve --plain          兼容旧普通模式：只接收整句明文推送（无对齐）
  *   remotetype test "文本"             本地直接测试 Rust 注入，不走公网服务
  *   remotetype auth login             统一登录（go-ah auth-hub）：免掉人工复制配对 key
- *   remotetype auth status|logout     查看/清除本机登录凭据
+ *   remotetype auth list|switch       多人共用一台电脑：查看/切换本机已存账号
+ *   remotetype auth status|logout     查看/清除本机登录凭据（logout 默认只清当前账号）
  *   remotetype doctor                 环境自检（平台/二进制/权限/网络）
  *   remotetype binary                 打印解析到的 Rust 二进制路径
  *
@@ -33,7 +34,12 @@ const { LocalStore } = require('../lib/store');
 const { Logger } = require('../lib/logger');
 const { sanitize } = require('../lib/sanitize');
 const { findBinary, isSupported, resolveTarget, binaryUrl, cacheDir } = require('../lib/platform');
-const { loadConfig, parseArgs, resolveEnterMode, saveConnectionConfig, clearAuthCredentials, readConfigFile, placeholderUrlReason, DEFAULT_SERVE_URL } = require('../lib/config');
+const {
+  loadConfig, parseArgs, resolveEnterMode, saveConnectionConfig, clearAuthCredentials,
+  readConfigFile, placeholderUrlReason, DEFAULT_SERVE_URL,
+  ensureClientId, generateClientId, saveAuthAccount, switchActiveAccount,
+} = require('../lib/config');
+const accountsLib = require('../lib/accounts');
 const { authLogin, getJson } = require('../lib/auth');
 
 const pkg = require('../package.json');
@@ -66,8 +72,10 @@ ${C.bold}命令${C.reset}
   ${C.cyan}serve --plain${C.reset}       兼容旧普通模式：只接收整句明文推送（/push 接口、外部脚本）
   ${C.cyan}test${C.reset} "<文本>"        本地测试：直接调用注入引擎，不连公网
   ${C.cyan}auth login${C.reset}          统一登录（弹浏览器）：换回设备令牌 + 会话密钥，之后免配 key
+  ${C.cyan}auth list${C.reset}           列出本机已存账号（多人共用同一台电脑时各登各的）
+  ${C.cyan}auth switch${C.reset} <账号>   切换当前生效账号（序号/邮箱/用户名/昵称；不带参数给选择器）
   ${C.cyan}auth status${C.reset}         查看当前身份、令牌剩余有效期、本机是否已登记
-  ${C.cyan}auth logout${C.reset}         清除本机登录凭据
+  ${C.cyan}auth logout${C.reset}         清除当前账号的登录凭据（--all 清空本机全部账号）
   ${C.cyan}doctor${C.reset}              环境自检：平台支持 / 注入二进制 / 权限 / 网络
   ${C.cyan}binary${C.reset}              打印解析到的注入引擎路径
 
@@ -77,6 +85,7 @@ ${C.bold}选项${C.reset}
   --key <KEY>            手动指定配对/会话 key（统一登录下由服务端自动下发，一般不需要）
   --server-http <url>    统一登录用的 HTTP 基址（默认从 --url 推导：ws://h:p/ws → http://h:p）
   --device-name <名>     手机端「我的电脑」列表里显示的名字（默认取主机名）
+  --account <账号>     serve 本次以该账号连接，不改动本机当前激活的账号
   --no-open              auth login 只打印授权地址、不弹浏览器（SSH / 无桌面环境用）
   --plain                切回旧普通模式：接收整句明文推送（无对齐、无加密）
   --align                （已默认开启，保留兼容；与 --plain 同给时 --plain 优先）
@@ -202,17 +211,57 @@ function printPlatformNotes(logger) {
 // ============================ auth ============================
 
 /**
- * auth 子命令组：统一登录（认证中心 = go-ah auth-hub）。
+ * 登录时的 clientId 决策：规则在 lib/accounts.js 的 planLoginClientId（纯函数、有单测），
+ * 这里只负责把输入凑齐、把结果翻译成人话打出来。
+ * @returns {{clientId:string, deviceName:string, retryOnOwnedByOther:boolean}}
+ */
+function decideLoginClientId({ view, identity, cfg, flags, prevErr }) {
+  const plan = accountsLib.planLoginClientId(view, identity, {
+    serverHttp: cfg.serverHttp,
+    machineClientId: ensureClientId(),
+    explicitClientId: (flags && flags.clientId) ? cfg.clientId : null,
+    deviceName: cfg.deviceName,
+    explicitDeviceName: Boolean(flags && flags.deviceName),
+    prevErr,
+    generate: generateClientId,
+  });
+  // 决策逻辑在 lib/accounts.js（纯函数、有单测）；提示文案留在命令层
+  if (plan.reason === 'retry') {
+    say(`${C.yellow}! 机器默认标识已被其他账号登记，本次改用新标识${C.reset}：${plan.clientId}`);
+  } else if (plan.reason === 'fresh') {
+    say(`${C.dim}本机已存其他账号，本次为该账号分配独立标识 ${plan.clientId}（手机端会把它当成一台单独的电脑）${C.reset}`);
+  }
+  return {
+    clientId: plan.clientId,
+    deviceName: plan.deviceName,
+    retryOnOwnedByOther: plan.retryOnOwnedByOther,
+  };
+}
+
+/**
+ * auth 子命令组：统一登录（认证中心 = go-ah auth-hub）+ 多账号账号簿。
  *
- *   auth login    打开浏览器完成一次授权 → 换回本服务的设备令牌 + 会话密钥并落盘
- *   auth status   看当前身份、令牌还剩多久、这台机器在不在服务端登记表里
- *   auth logout   抹掉本机存的凭据（服务端的设备记录保留，可被属主重新绑定）
+ *   auth login           打开浏览器完成一次授权 → 换回设备令牌 + 会话密钥并落盘
+ *   auth list            列出本机已存账号（标出当前生效的那个）
+ *   auth switch <账号>    切换当前生效账号——多人共用这台电脑时就是换人
+ *   auth status          看当前身份、令牌还剩多久、这台机器在不在服务端登记表里
+ *   auth logout          抹掉**当前账号**的凭据（--all 清空全部账号）；
+ *                        服务端的设备记录保留，可被属主重新登录绑定
+ *
+ * ── 多账号为什么能成立 ──────────────────────────────────────────────────
+ * 服务端注册表是 clientId→属主 的永久一对一，改绑一律拒绝（/auth/verify 403、
+ * WS register 4403），也没有解绑途径。所以"一台电脑多账号"不能靠改绑，只能
+ * **每个账号各持一个 clientId**——服务端从不拒绝新 clientId 登记为新设备。
+ * 登录时先做一次身份预检（不带 clientId 换用户令牌，服务端不产生任何状态），
+ * 知道是谁之后再决定沿用原标识还是领新标识。账号落在 config.json 的 accounts 表里，
+ * flat 字段始终镜像当前激活账号，于是 serve/status/doctor 这些既有读路径一行都不用改。
  *
  * 与旧 `--key` 的关系：两者并存且互不覆盖。`--key` 显式传入时优先，
  * 让人能临时连一台没开统一登录的老服务器，而不必先清配置。
  */
-async function cmdAuth(cfg, sub) {
-  const action = sub || 'status';
+async function cmdAuth(cfg, rest, flags = {}) {
+  const action = (rest && rest[0]) || 'status';
+  const target = rest && rest[1];
 
   if (action === 'login') {
     if (!cfg.serverHttp) {
@@ -231,7 +280,11 @@ async function cmdAuth(cfg, sub) {
       return;
     }
     say(`${C.dim}服务端：${cfg.serverHttp}${C.reset}`);
-    say(`${C.dim}本机标识：${cfg.clientId}    设备名：${cfg.deviceName}${C.reset}`);
+
+    // 身份预检要用的"本机现存账号"视图；老配置的 flat 凭据在这里被合成成首个条目，
+    // 所以"第二个人登录"不会把第一个人的登录态挤掉。
+    const rawCfg = readConfigFile();
+    const view = accountsLib.withAccounts(rawCfg, { defaultClientId: ensureClientId() });
 
     let res;
     try {
@@ -240,6 +293,9 @@ async function cmdAuth(cfg, sub) {
         clientId: cfg.clientId,
         deviceName: cfg.deviceName,
         noOpen: cfg.noOpen === true,
+        resolveClientId: (identity, prevErr) => decideLoginClientId({
+          view, identity, cfg, flags, prevErr,
+        }),
         onUrl: (url) => {
           say('');
           say(`${C.yellow}请在弹出的浏览器里完成统一登录${C.reset}（未自动弹出就手动打开下面地址）`);
@@ -254,18 +310,31 @@ async function cmdAuth(cfg, sub) {
       return;
     }
 
-    const saved = saveConnectionConfig({
-      url: cfg.url,
+    // 落盘：一个账号 = 一条完整登录态（含它自己的 clientId），并激活为当前账号
+    const accountEntry = {
+      userId: res.userId,
+      email: res.email,
+      username: res.username,
+      nickname: res.nickname,
       deviceToken: res.token,
-      sessionKey: res.sessionKey,
+      expiresAt: res.tokenExpiresAt,
+      sessionKey: res.sessionKey || '',
       serverHttp: res.serverHttp,
-      deviceName: cfg.deviceName,
-      authUser: {
-        userId: res.userId, email: res.email, username: res.username,
-        nickname: res.nickname, loginAt: Date.now(), expiresAt: res.tokenExpiresAt,
-      },
-    });
-    say(`${C.green}✓ 登录成功${C.reset}：${res.nickname || res.username || res.email || res.userId}`);
+      url: cfg.url,
+      // 设备名取服务端记录里的那个：这次登录可能沿用了条目里存的名字
+      // （比如 B 登录时本机还激活着 A），写 cfg.deviceName 会把 A 的名字记进 B 的条目
+      deviceName: (res.device && res.device.deviceName) || res.deviceName || cfg.deviceName,
+      clientId: res.clientId || cfg.clientId,
+      loginAt: Date.now(),
+    };
+    const saved = saveAuthAccount({ entry: accountEntry, setActive: true });
+    const storedCount = accountsLib.listAccounts(
+      accountsLib.withAccounts(readConfigFile(), {}),
+    ).length;
+
+    say(`${C.green}✓ 登录成功${C.reset}：${accountsLib.labelOf(accountEntry)}`);
+    if (accountEntry.email) say(`  邮箱    ${accountEntry.email}`);
+    say(`  本机标识 ${accountEntry.clientId}    设备名 ${accountEntry.deviceName}`);
     if (res.sessionKey) {
       say(`${C.dim}会话密钥已由服务端下发（${String(res.sessionKey).slice(0, 8)}…），手机登录后会自动拿到同一把，无需再手填配对 key${C.reset}`);
     } else {
@@ -276,21 +345,101 @@ async function cmdAuth(cfg, sub) {
       say(`${C.dim}设备令牌有效期约 ${days} 天，过期后重新执行 npx nx-rt auth login${C.reset}`);
     }
     say(`${C.dim}已保存 → ${saved.file}${C.reset}`);
+    if (storedCount >= 2) {
+      say(`${C.dim}本机已存 ${storedCount} 个账号：npx nx-rt auth list 查看，npx nx-rt auth switch <账号> 切换${C.reset}`);
+    }
     say(`${C.green}现在直接 npx nx-rt 即可启动，手机端的「远程输入」里能看到这台电脑${C.reset}`);
     return;
   }
 
+  // ---- auth list：本机已存账号一览 ----
+  if (action === 'list') {
+    const view = accountsLib.withAccounts(readConfigFile(), { defaultClientId: ensureClientId() });
+    const list = accountsLib.listAccounts(view);
+    if (!list.length) {
+      say(`${C.yellow}本机还没有已存账号${C.reset}：先执行 npx nx-rt auth login`);
+      return;
+    }
+    say(`${C.bold}本机已存账号${C.reset}（共 ${list.length} 个）`);
+    list.forEach((a, i) => printAccountLine(i + 1, a, a.key === view.activeAccountKey));
+    say(`${C.dim}切换：npx nx-rt auth switch <序号|邮箱|用户名|昵称>${C.reset}`);
+    return;
+  }
+
+  // ---- auth switch：切换当前生效账号 ----
+  if (action === 'switch') {
+    const view = accountsLib.withAccounts(readConfigFile(), { defaultClientId: ensureClientId() });
+    const list = accountsLib.listAccounts(view);
+    if (!list.length) {
+      say(`${C.yellow}本机还没有已存账号${C.reset}：先执行 npx nx-rt auth login`);
+      process.exitCode = 1;
+      return;
+    }
+
+    let picked = target;
+    if (!picked) {
+      // 不带参数：交互终端给编号选择器，非交互（脚本/管道）只列清单并报错——
+      // 绝不在没人看着的时候猜一个账号切过去。
+      if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+        say(`${C.yellow}未指定要切换到的账号${C.reset}。本机已存：`);
+        list.forEach((a, i) => printAccountLine(i + 1, a, a.key === view.activeAccountKey));
+        say(`${C.dim}用法：npx nx-rt auth switch <序号|邮箱|用户名|昵称>${C.reset}`);
+        process.exitCode = 1;
+        return;
+      }
+      try {
+        picked = await pickAccountInteractively(list, view.activeAccountKey);
+      } catch {
+        picked = null; // Ctrl+D / 输入流关闭
+      }
+      if (!picked) {
+        say(`${C.dim}已取消，当前账号未变${C.reset}`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+
+    let r;
+    try {
+      r = switchActiveAccount(picked, { defaultClientId: ensureClientId() });
+    } catch (e) {
+      say(`${C.red}✗ ${e.message}${C.reset}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!r.changed) {
+      say(`${C.dim}当前已经就是这个账号${C.reset}：${accountsLib.labelOf(r.entry)}`);
+      return;
+    }
+    say(`${C.green}✓ 已切换${C.reset} → ${accountsLib.labelOf(r.entry)}`);
+    if (r.entry.email) say(`  邮箱    ${r.entry.email}`);
+    say(`  本机标识 ${r.entry.clientId || '(无)'}    服务端 ${r.entry.serverHttp || '(未知)'}`);
+    if (accountsLib.isExpired(r.entry)) {
+      say(`${C.yellow}! 该账号的设备令牌已过期${C.reset}：执行 npx nx-rt auth login 重新登录它（浏览器里登这个账号）`);
+    }
+    say(`${C.dim}正在运行的 serve 不会自动换账号：Ctrl+C 结束它，再跑 npx nx-rt 即按新账号连接${C.reset}`);
+    return;
+  }
+
   if (action === 'logout') {
-    const r = clearAuthCredentials();
-    say(r.changed
-      ? `${C.green}✓ 已清除本机统一登录凭据${C.reset}（${r.file}）`
-      : `${C.dim}本机本来就没有登录凭据${C.reset}`);
+    const all = flags.all === true;
+    const r = clearAuthCredentials({ all });
+    if (!r.changed) {
+      say(`${C.dim}本机本来就没有登录凭据${C.reset}`);
+      return;
+    }
+    say(all
+      ? `${C.green}✓ 已清除本机全部账号凭据${C.reset}（${r.file}）`
+      : `${C.green}✓ 已清除当前账号的凭据${C.reset}（${r.file}）`);
+    if (r.remaining > 0) {
+      say(`${C.dim}本机还剩 ${r.remaining} 个账号：npx nx-rt auth list 查看，npx nx-rt auth switch <账号> 切回某个账号${C.reset}`);
+    }
     return;
   }
 
   if (action !== 'status') {
     say(`${C.red}未知子命令：auth ${action}${C.reset}`);
-    say(`可用：login | status | logout`);
+    say(`可用：login | list | switch <账号> | status | logout [--all]`);
     process.exitCode = 1;
     return;
   }
@@ -300,7 +449,12 @@ async function cmdAuth(cfg, sub) {
   const u = file.authUser || null;
   if (!file.deviceToken) {
     say(`${C.yellow}未登录${C.reset}（${file.alignKey ? '当前使用旧的手动配对 key 模式' : '也没有配对 key'}）`);
-    say(`${C.dim}执行 npx nx-rt auth login 接入统一登录平台${C.reset}`);
+    const others = accountsLib.listAccounts(
+      accountsLib.withAccounts(file, { defaultClientId: ensureClientId() }),
+    );
+    say(others.length > 0
+      ? `${C.dim}本机还存着 ${others.length} 个账号：npx nx-rt auth switch <账号> 切回某个账号（auth list 看清单）${C.reset}`
+      : `${C.dim}执行 npx nx-rt auth login 接入统一登录平台${C.reset}`);
     return;
   }
   say(`${C.bold}统一登录状态${C.reset}`);
@@ -314,6 +468,14 @@ async function cmdAuth(cfg, sub) {
     const left = exp - Date.now();
     if (left <= 0) say(`  ${C.red}令牌已过期${C.reset}，请重新 npx nx-rt auth login`);
     else say(`  剩余    ${Math.floor(left / 86400000)} 天 ${Math.floor((left % 86400000) / 3600000)} 小时`);
+  }
+  // 多账号提示：≥2 个才提，单账号环境不必多一行噪音
+  const accView = accountsLib.withAccounts(file, {});
+  const accList = accountsLib.listAccounts(accView);
+  if (accList.length >= 2) {
+    const cur = accView.accounts[accView.activeAccountKey];
+    say(`  账号    本机共 ${accList.length} 个，当前 ${cur ? accountsLib.labelOf(cur) : '(未激活)'}`
+      + `（npx nx-rt auth list 查看，auth switch <账号> 切换）`);
   }
 
   // 向服务端验一次令牌：本地有 token 不代表服务端还认（可能已被吊销或换过 JWT_SECRET）。
@@ -340,6 +502,39 @@ async function cmdAuth(cfg, sub) {
   }
 }
 
+/** 一行账号信息：`[1] * 标签 <邮箱> — clientId — 服务端 — 剩 N 天`。 */
+function printAccountLine(idx, item, isActive) {
+  const e = item.entry;
+  const mark = isActive ? `${C.green}*${C.reset}` : ' ';
+  const left = e.expiresAt
+    ? `，剩 ${Math.max(0, Math.floor((e.expiresAt - Date.now()) / 86400000))} 天`
+    : '';
+  say(`  ${mark} [${idx}] ${C.bold}${accountsLib.labelOf(e)}${C.reset}`
+    + (e.email && e.email !== accountsLib.labelOf(e) ? ` <${e.email}>` : ''));
+  say(`${C.dim}        clientId ${e.clientId || '(无)'} — ${e.serverHttp || '(未知服务端)'}${left}${C.reset}`);
+}
+
+/** 交互式编号选择器（仅 TTY）：返回用户输入的序号字符串，回车取消。 */
+async function pickAccountInteractively(list, activeKey) {
+  // 延迟 require：非交互路径（脚本 / CI）不必碰 readline
+  const readline = require('node:readline/promises');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    list.forEach((a, i) => printAccountLine(i + 1, a, a.key === activeKey));
+    for (;;) {
+      const ans = String(await rl.question(`选择要切换到的账号 [1-${list.length}]（直接回车取消）：`)).trim();
+      if (!ans) return null;
+      if (/^\d+$/.test(ans)) {
+        const n = Number.parseInt(ans, 10);
+        if (n >= 1 && n <= list.length) return ans;
+      }
+      say(`${C.yellow}! 请输入 1-${list.length} 之间的序号${C.reset}`);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
 /** --no-open 的布尔判定（parseArgs 把 --no-open 映射成 noOpen: true）。 */
 function flagsTruthy(cfg) {
   return cfg.noOpen === true;
@@ -350,8 +545,71 @@ function flagsTruthy(cfg) {
 /**
  * serve 子命令：启动守护进程。
  * 链路：Serve(WS) → 队列(串行) → AgentManager(stdio) → Rust → 系统注入
+ * @param {object} cfg loadConfig 产物
+ * @param {object} [flags] CLI 原始参数（--account / --key 要区分"显式传入"与"配置里的旧值"）
  */
-async function cmdServe(cfg) {
+async function cmdServe(cfg, flags = {}) {
+  // --account：本次以指定账号连接（多人共用这台电脑时按人次切换），
+  // 只影响本次运行，**不改动**本机当前激活的账号（那是 auth switch 的事）。
+  let runAccountKey = null;
+  if (flags.account !== undefined && flags.account !== null) {
+    if (flags.account === true) {
+      say(`${C.red}--account 需要一个账号${C.reset}：序号 / 邮箱 / 用户名 / 昵称`);
+      say(`${C.dim}先看清单：npx nx-rt auth list${C.reset}`);
+      process.exitCode = 1;
+      return;
+    }
+    let picked;
+    try {
+      picked = accountsLib.resolveAccountEntry(readConfigFile(), flags.account, {
+        defaultClientId: ensureClientId(),
+      });
+    } catch (e) {
+      say(`${C.red}✗ ${e.message}${C.reset}`);
+      process.exitCode = 1;
+      return;
+    }
+    const e = picked.entry;
+    runAccountKey = picked.key;
+    const rawKey = flags.key ?? process.env.REMOTETYPE_KEY ?? null;
+    const explicitKey = typeof rawKey === 'string' && rawKey ? rawKey : null;
+    // 会话密钥只用这个账号自己的：显式 --key 优先，否则 entry.sessionKey。
+    // 刻意**不回落**到配置里的 alignKey——那可能是本机另一个账号留下的机器级密钥，
+    // 拿它配对等于跟错了人（表现为"连得上但什么都不注入"）。
+    cfg.sessionKey = explicitKey || e.sessionKey || null;
+    if (!explicitKey) cfg.alignKey = null;
+    cfg.deviceToken = e.deviceToken;
+    cfg.clientId = e.clientId || cfg.clientId;
+    if (e.url) cfg.url = e.url;
+    if (e.serverHttp) cfg.serverHttp = e.serverHttp;
+    if (e.deviceName) cfg.deviceName = e.deviceName;
+    cfg.authUser = {
+      userId: e.userId,
+      email: e.email,
+      username: e.username,
+      nickname: e.nickname,
+      loginAt: e.loginAt ?? null,
+      expiresAt: e.expiresAt ?? null,
+    };
+    say(`${C.dim}本次以账号 ${accountsLib.labelOf(e)}（clientId ${cfg.clientId}）连接；本机激活账号不变${C.reset}`);
+    if (accountsLib.isExpired(e)) {
+      say(`${C.yellow}! 该账号的设备令牌已过期${C.reset}：先 npx nx-rt auth login 重新登录它`);
+    }
+  }
+
+  // 没给 --account 时，本次运行的账号 = 启动这一刻的激活账号，**在这里定死**。
+  // 回写时若按"当前激活"重新解析，serve 跑着的时候另一个终端 auth switch 换了人，
+  // 这次回写就会把本进程的运行期字段写进**别人的**条目、顺带把别人的 flat 一起改掉。
+  if (!runAccountKey) {
+    const rawNow = readConfigFile();
+    const accNow = accountsLib.withAccounts(rawNow, { defaultClientId: ensureClientId() });
+    if (rawNow.accounts && typeof rawNow.accounts === 'object'
+      && Object.keys(rawNow.accounts).length > 0
+      && accNow.accounts[accNow.activeAccountKey]) {
+      runAccountKey = accNow.activeAccountKey;
+    }
+  }
+
   const logger = new Logger({
     level: cfg.logLevel,
     logDir: cfg.logDir,
@@ -647,17 +905,25 @@ async function cmdServe(cfg) {
     logger.info('服务端已登记本机', {
       clientId: msg.clientId, role: msg.role, owner: msg.device && msg.device.owner,
     });
-    // 连通即保存：本次成功连接的 url/key/token 成为下次默认（--no-save 跳过）
+    // 连通即保存：本次成功连接的 url/key/token 成为下次默认（--no-save 跳过）。
+    // accountKey 让回写落到"本次运行的那个账号"条目上：是激活账号就顺带打平 flat，
+    // 是 --account 借用的别人账号就只写它自己的条目，不动 flat 的镜像关系。
     if (!cfg.noSave) {
-      const saved = saveConnectionConfig({
-        url: cfg.url,
-        alignKey: cfg.alignKey,
-        token: cfg.token,
-        deviceToken: cfg.deviceToken,
-        sessionKey: serve.sessionKey || cfg.sessionKey,
-        deviceName: cfg.deviceName,
-        serverHttp: cfg.serverHttp,
-      });
+      let saved = { changed: false };
+      try {
+        saved = saveConnectionConfig({
+          url: cfg.url,
+          alignKey: cfg.alignKey,
+          token: cfg.token,
+          deviceToken: cfg.deviceToken,
+          sessionKey: serve.sessionKey || cfg.sessionKey,
+          deviceName: cfg.deviceName,
+          serverHttp: cfg.serverHttp,
+        }, { accountKey: runAccountKey });
+      } catch (e) {
+        // 连接已经通了：配置里这次没记住不该让 serve 倒下（下次成功连接还会再存一遍）
+        logger.warn('连接配置保存失败（不影响本次连接）', { error: e.message });
+      }
       if (saved.changed) {
         say(`${C.dim}已保存连接配置 → ${saved.file}${C.reset}`);
         say(`${C.dim}下次直接 npx nx-rt 即可用同样参数连接${C.reset}`);
@@ -669,7 +935,13 @@ async function cmdServe(cfg) {
   serve.on('session-key', (key) => {
     const swapped = align ? align.setKey(key) : false;
     logger.info('采纳服务端下发的会话密钥', { appliedToAlign: swapped, preview: String(key).slice(0, 8) });
-    if (!cfg.noSave) saveConnectionConfig({ sessionKey: key });
+    if (!cfg.noSave) {
+      try {
+        saveConnectionConfig({ sessionKey: key }, { accountKey: runAccountKey });
+      } catch (e) {
+        logger.warn('会话密钥保存失败（不影响本次连接）', { error: e.message });
+      }
+    }
   });
 
   serve.on('text', (msg) => {
@@ -706,7 +978,9 @@ async function cmdServe(cfg) {
   // 两者都需要人工介入，重连无意义，直接退出。
   serve.on('auth-rejected', ({ code }) => {
     if (code === 4401) {
-      logger.error('服务端要求统一登录：执行 npx nx-rt auth login（令牌过期同理）');
+      logger.error(runAccountKey
+        ? '服务端要求统一登录：本次 --account 指定账号的令牌缺失或已过期，请重新 npx nx-rt auth login 登录该账号'
+        : '服务端要求统一登录：执行 npx nx-rt auth login（令牌过期同理）');
     } else {
       logger.error('token 无效或缺失：请核对 --token / REMOTETYPE_TOKEN 与服务器 RT_TOKEN 是否一致');
     }
@@ -963,20 +1237,22 @@ async function main() {
   if (flags.help && !command) return printHelp();
   if (!command) {
     // 裸命令 = serve：连通过一次后参数已存盘，npx nx-rt 直接连（最短路径）
-    return cmdServe(loadConfig(flags));
+    // flags 一并传下去：--account / --key 的"显式与否"要在命令层判断，
+    // 而 loadConfig 会把显式 key 与配置里的旧 alignKey 合流成一个 cfg.sessionKey。
+    return cmdServe(loadConfig(flags), flags);
   }
 
   const cfg = loadConfig(flags);
 
   switch (command) {
     case 'serve':
-      return cmdServe(cfg);
+      return cmdServe(cfg, flags);
     case 'test':
       return cmdTest(cfg, rest);
     case 'doctor':
       return cmdDoctor(cfg);
     case 'auth':
-      return cmdAuth(cfg, rest[0]);
+      return cmdAuth(cfg, rest, flags);
     case 'binary':
       return cmdBinary(cfg);
     case 'help':
