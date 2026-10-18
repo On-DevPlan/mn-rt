@@ -18,8 +18,11 @@
  *   - 房间号不再是路由地址，但仍从 key 派生并用作 AAD 上下文标签
  *     （AAD = RT1|<派生room>|<方向>|<seq>，两端一致即可，向量保持不变）。
  *
- * 明文格式（信封解密后）：{ text: string, ts: number, phoneId: string }
+ * 明文格式（信封解密后）：
+ *   快照：{ text: string, ts: number, phoneId: string, enterMode?: string }
+ *   事件：{ hotkey: string[], ts, phoneId } | { mouse: object, ts, phoneId }
  *   phoneId 用于 PC → 手机的 ACK 反向路由（经 server.js 转发，明文元数据，不敏感）。
+ *   事件（hotkey / mouse）在 seq 去重之前处理：重复应重复生效，且不碰快照状态机。
  */
 
 const EventEmitter = require('events');
@@ -38,6 +41,47 @@ const PLAN_RETRIES = 3;
  * 'raw' 不在列——它只是老手机（不带该字段）在 PC 侧的兜底，不是手机端的合法选择。
  */
 const ENTER_MODES = new Set(['enter', 'shift_enter']);
+
+/** mouse_move 单轴增量的绝对值上限（手机端合批后的单帧量级远小于此） */
+const MOUSE_MOVE_MAX = 2000;
+/** mouse_scroll 单轴格数上限 */
+const MOUSE_SCROLL_MAX = 30;
+/** mouse_button 键名白名单 */
+const MOUSE_BUTTONS = new Set(['left', 'right', 'middle']);
+/** mouse_button 动作白名单 */
+const MOUSE_KINDS = new Set(['click', 'press', 'release']);
+
+/**
+ * 校验并归一化手机端 mouse 载荷（v0.6.0+ 触摸板协议）。
+ *
+ * 返回归一化后的 op 载荷；非法返回 null（丢弃该信封的 mouse 部分，不影响
+ * 同会话后续信封）。这里挡在 rt-align 一层，垃圾数据绝不流向 rust agent：
+ *   - {a:'move',   dx, dy}        相对移动（像素）
+ *   - {a:'button', button, kind}  按键（left|right|middle × click|press|release）
+ *   - {a:'scroll', dx, dy}        滚轮（格，正数 = 向下/向右，与 enigo 一致）
+ */
+function normalizeMouseOp(m) {
+  const int32 = (v) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) ? n : 0;
+  };
+  const clamp = (v, max) => Math.max(-max, Math.min(max, v));
+
+  switch (m.a) {
+    case 'move':
+      return { a: 'move', dx: clamp(int32(m.dx), MOUSE_MOVE_MAX), dy: clamp(int32(m.dy), MOUSE_MOVE_MAX) };
+    case 'button': {
+      const button = String(m.button ?? '');
+      const kind = String(m.kind ?? '');
+      if (!MOUSE_BUTTONS.has(button) || !MOUSE_KINDS.has(kind)) return null;
+      return { a: 'button', button, kind };
+    }
+    case 'scroll':
+      return { a: 'scroll', dx: clamp(int32(m.dx), MOUSE_SCROLL_MAX), dy: clamp(int32(m.dy), MOUSE_SCROLL_MAX) };
+    default:
+      return null;
+  }
+}
 
 /** 判断一段 text 是否形如 RT1 信封（直连模式区分加密/明文流量用）。 */
 function looksLikeEnvelope(text) {
@@ -89,6 +133,7 @@ class RtAlignSession extends EventEmitter {
 
     this.stats = {
       envelopesOk: 0, envelopesBad: 0, syncsApplied: 0, acksSent: 0, plaintextRejected: 0,
+      mouseEvents: 0, mouseDropped: 0,
     };
 
     // 看门狗自驱动：commit 事件若因队列溢出等丢失，busy 会卡死（relay-client 时代由
@@ -171,6 +216,26 @@ class RtAlignSession extends EventEmitter {
       this.stats.envelopesOk += 1;
       this._sendAck(seq); // 直接回「已受理」：无按键计划需要 commit
       this.emit('op', { op: 'hotkey', key: main, modifiers, seq });
+      return 'envelope';
+    }
+
+    // 鼠标事件（v0.6.0+ 触摸板）：与 hotkey 同属「事件」语义——seq 去重之前
+    // 处理、不碰快照状态机。与 hotkey 的差异：
+    //   * 高频（移动 30-60Hz），不回 ACK——ACK 流量会翻倍且手机端不依赖
+    //     逐笔确认（连接级 e2eConfirmed 由文字/快捷键的 ACK 建立）；
+    //   * 载荷先过 normalizeMouseOp 白名单，垃圾数据在这里丢弃，绝不流向
+    //     rust agent。
+    if (plain.mouse !== null && typeof plain.mouse === 'object') {
+      const mouse = normalizeMouseOp(plain.mouse);
+      if (mouse === null) {
+        this.stats.envelopesBad += 1;
+        this.logger?.warn('align 丢弃非法 mouse 载荷', { seq });
+        return 'duplicate';
+      }
+      this.phoneId = typeof plain.phoneId === 'string' ? plain.phoneId : '';
+      this.stats.envelopesOk += 1;
+      this.stats.mouseEvents += 1;
+      this.emit('op', { op: 'mouse', mouse, seq });
       return 'envelope';
     }
 
@@ -307,4 +372,4 @@ class RtAlignSession extends EventEmitter {
   }
 }
 
-module.exports = { RtAlignSession, looksLikeEnvelope };
+module.exports = { RtAlignSession, looksLikeEnvelope, normalizeMouseOp };

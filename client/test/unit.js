@@ -667,6 +667,141 @@ test('align：hotkey 空数组 / 非数组字段 → 按旧规则处理（向后
   assert.deepStrictEqual(ops, []);
 });
 
+// ---- 鼠标事件（v0.6.0+ 触摸板）----
+
+const { normalizeMouseOp } = require('../lib/rt-align');
+const { MousePump } = require('../lib/mouse');
+
+/** 以手机身份密封一条鼠标事件（与 sealedHotkey 同链路，明文带 mouse 字段）。 */
+function sealedMouse(align, mouse, seq, sid = 's1', phoneId = 'phone-e2e') {
+  const { seal, buildAad } = require('../lib/rt-crypto');
+  const plain = { mouse, ts: 0, phoneId };
+  return JSON.stringify(
+    seal(align.keyPhoneToPc, buildAad(align.room, 'p2c', seq), plain, { sid, seq }),
+  );
+}
+
+test('normalizeMouseOp：三类载荷白名单归一化', () => {
+  assert.deepStrictEqual(
+    normalizeMouseOp({ a: 'move', dx: 12, dy: -5 }),
+    { a: 'move', dx: 12, dy: -5 },
+  );
+  assert.deepStrictEqual(
+    normalizeMouseOp({ a: 'button', button: 'right', kind: 'click' }),
+    { a: 'button', button: 'right', kind: 'click' },
+  );
+  assert.deepStrictEqual(
+    normalizeMouseOp({ a: 'scroll', dx: 0, dy: 3.9 }),
+    { a: 'scroll', dx: 0, dy: 4 },
+    '滚轮格数四舍五入',
+  );
+  // 缺字段按 0 处理（dx/dy 可选）
+  assert.deepStrictEqual(normalizeMouseOp({ a: 'move' }), { a: 'move', dx: 0, dy: 0 });
+});
+
+test('normalizeMouseOp：越界截断 + 非法载荷返回 null', () => {
+  assert.deepStrictEqual(
+    normalizeMouseOp({ a: 'move', dx: 99999, dy: -99999 }),
+    { a: 'move', dx: 2000, dy: -2000 },
+  );
+  assert.strictEqual(normalizeMouseOp({ a: 'button', button: 'back', kind: 'click' }), null);
+  assert.strictEqual(normalizeMouseOp({ a: 'button', button: 'left', kind: 'double' }), null);
+  assert.strictEqual(normalizeMouseOp({ a: 'teleport', dx: 1 }), null);
+  assert.strictEqual(normalizeMouseOp({ a: 'scroll', dx: NaN, dy: Infinity }).dx, 0);
+});
+
+test('align：mouse 信封 → mouse op，不进 diff 状态机、不回 ACK', () => {
+  const { align, ops, acks } = newTestAlign(vectors.input_key);
+  assert.strictEqual(
+    align.handleIncoming(sealedMouse(align, { a: 'move', dx: 3, dy: 4 }, 1)),
+    'envelope',
+  );
+  assert.deepStrictEqual(ops.map((o) => o.op), ['mouse']);
+  assert.deepStrictEqual(ops[0].mouse, { a: 'move', dx: 3, dy: 4 });
+  assert.strictEqual(align.phoneId, 'phone-e2e');
+  // 高频通道不回 ACK（流量减半；e2eConfirmed 由文字/快捷键 ACK 建立）
+  assert.strictEqual(acks.length, 0);
+  // 快照状态不被污染
+  assert.strictEqual(align.desiredText, null);
+  assert.strictEqual(align.mirror, '');
+  assert.strictEqual(align.busy, false);
+  assert.strictEqual(align.stats.mouseEvents, 1);
+});
+
+test('align：mouse 重复 seq 不去重（事件语义，拖动中不得丢帧）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedMouse(align, { a: 'move', dx: 1, dy: 1 }, 1));
+  align.handleIncoming(sealedMouse(align, { a: 'move', dx: 2, dy: 2 }, 1));
+  assert.strictEqual(ops.length, 2);
+});
+
+test('align：非法 mouse 载荷丢弃并计数，不影响后续信封', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  assert.strictEqual(
+    align.handleIncoming(sealedMouse(align, { a: 'teleport' }, 1)),
+    'duplicate',
+  );
+  assert.deepStrictEqual(ops, []);
+  assert.strictEqual(align.stats.envelopesBad, 1);
+  // 后续合法 mouse / 快照照常
+  assert.strictEqual(
+    align.handleIncoming(sealedMouse(align, { a: 'button', button: 'left', kind: 'click' }, 2)),
+    'envelope',
+  );
+  align.handleIncoming(sealedSync(align, '你好', 3));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['mouse', 'type', 'commit']);
+});
+
+test('align：mouse 与 hotkey 同属事件层，互不占用快照 seq', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedMouse(align, { a: 'move', dx: 1, dy: 1 }, 1));
+  align.handleIncoming(sealedHotkey(align, ['f5'], 2));
+  align.handleIncoming(sealedSync(align, 'A', 3));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['mouse', 'hotkey', 'type', 'commit']);
+});
+
+test('MousePump：move 合批成单条；button 前先冲刷移动（先到位后点击）', async () => {
+  const sent = [];
+  const pump = new MousePump({ send: async (p) => sent.push(p), flushIntervalMs: 5 });
+  pump.dispatch({ a: 'move', dx: 3, dy: 4 });
+  pump.dispatch({ a: 'move', dx: 1, dy: -2 });
+  pump.dispatch({ a: 'button', button: 'left', kind: 'click' });
+  assert.strictEqual(sent.length, 2, 'button 派发前移动立即冲刷（send 同步入队）');
+  assert.deepStrictEqual(sent, [
+    { action: 'mouse_move', dx: 4, dy: 2 },
+    { action: 'mouse_button', button: 'left', kind: 'click' },
+  ]);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.strictEqual(sent.length, 2, '定时冲刷不再追加（增量已被冲掉）');
+  assert.strictEqual(pump.stats.movesSent, 1);
+  assert.strictEqual(pump.stats.buttonsSent, 1);
+  pump.stop();
+});
+
+test('MousePump：定时冲刷挂起增量；零增量零滚动不派发', async () => {
+  const sent = [];
+  const pump = new MousePump({ send: async (p) => sent.push(p), flushIntervalMs: 5 });
+  pump.dispatch({ a: 'move', dx: 0, dy: 0 });
+  pump.dispatch({ a: 'scroll', dx: 0, dy: 0 });
+  assert.deepStrictEqual(sent, [], '零增量不应产生任何指令');
+  pump.dispatch({ a: 'scroll', dx: 0, dy: 2 });
+  pump.dispatch({ a: 'move', dx: 5, dy: 0 });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(sent, [
+    { action: 'mouse_scroll', dx: 0, dy: 2 },
+    { action: 'mouse_move', dx: 5, dy: 0 },
+  ]);
+  pump.stop();
+});
+
+test('MousePump：stop 冲刷挂起增量（优雅退出不丢最后一帧）', () => {
+  const sent = [];
+  const pump = new MousePump({ send: async (p) => sent.push(p) });
+  pump.dispatch({ a: 'move', dx: 7, dy: 8 });
+  pump.stop();
+  assert.deepStrictEqual(sent, [{ action: 'mouse_move', dx: 7, dy: 8 }]);
+});
+
 test('align：发送模式 Enter 提交后 mirror 归零（目标框已随消息清空）', () => {
   const { align, ops } = newTestAlign(vectors.input_key);
   align.handleIncoming(sealedSync(align, '你好\n', 1, 's1', 'phone-e2e', 'enter'));

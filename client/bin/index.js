@@ -29,6 +29,7 @@ const { AgentManager } = require('../lib/agent');
 const { MessageQueue } = require('../lib/queue');
 const { ServeClient } = require('../lib/ws-client');
 const { RtAlignSession, looksLikeEnvelope } = require('../lib/rt-align');
+const { MousePump } = require('../lib/mouse');
 const rtCrypto = require('../lib/rt-crypto');
 const { LocalStore } = require('../lib/store');
 const { Logger } = require('../lib/logger');
@@ -707,6 +708,13 @@ async function cmdServe(cfg, flags = {}) {
     requestTimeoutMs: cfg.requestTimeoutMs,
   });
 
+  // 鼠标指令泵（触摸板）：绕过串行队列直通 agent，移动增量合批。
+  // send 不 await——agent 对鼠标指令零延时立即应答，rejection 只记日志。
+  const mousePump = new MousePump({
+    send: (payload) => agent.send(payload),
+    logger,
+  });
+
   // 对齐模式会话（可选）；serve 在其后创建，sendAck 闭包引用
   let align = null;
   let serve;
@@ -906,6 +914,12 @@ async function cmdServe(cfg, flags = {}) {
       logger.error('解密失败：两端 key 不一致？', { seq });
     });
     align.on('op', (op) => {
+      // 鼠标事件（v0.6.0+ 触摸板）：高频、可丢可合并——绝不进串行队列，
+      // 否则会被文本/组合键的注入延时拖出可见卡顿（见 lib/mouse.js 头注释）。
+      if (op.op === 'mouse') {
+        mousePump.dispatch(op.mouse);
+        return;
+      }
       const accepted = queue.push(op, { source: 'align', enqueuedAt: Date.now() });
       if (!accepted) {
         logger.warn('队列溢出，丢弃计划', { op: op.op, seq: op.seq });
@@ -1035,6 +1049,7 @@ async function cmdServe(cfg, flags = {}) {
       agent: agent.stats,
       serve: serve ? serve.stats : null,
       align: align ? align.stats : null,
+      mouse: mousePump.stats,
       store: store.stats(),
     });
   }, 60000);
@@ -1049,6 +1064,7 @@ async function cmdServe(cfg, flags = {}) {
     logger.info(`收到 ${signal}，开始优雅退出`);
     queue.pause();
     align?.dispose();
+    mousePump.stop();
     serve?.close();
     // 给队列里剩余消息一点时间跑完
     const drained = await queue.waitIdle(8000);

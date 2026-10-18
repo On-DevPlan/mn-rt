@@ -17,11 +17,29 @@
 //!       （Node -> Rust，stdin）:  {"action":"type_text","text":"...","enter_mode":"shift_enter"}
 //!       （Node -> Rust，stdin）:  {"action":"backspace","count":N}
 //!       （Node -> Rust，stdin）:  {"action":"hotkey","key":"return","modifiers":["shift"]}
+//!       （Node -> Rust，stdin）:  {"action":"mouse_move","dx":12,"dy":-5}
+//!       （Node -> Rust，stdin）:  {"action":"mouse_button","button":"left","kind":"click"}
+//!       （Node -> Rust，stdin）:  {"action":"mouse_scroll","dx":0,"dy":3}
 //!       （Node -> Rust，stdin）:  {"action":"ping"}
 //! 协议（Rust -> Node，stdout）: {"ok":true,"msg":"input complete"}
 //!                               {"ok":true,"msg":"backspace complete","count":N}
 //!                               {"ok":true,"msg":"hotkey complete","combo":"shift+return"}
+//!                               {"ok":true,"msg":"mouse_move complete","dx":12,"dy":-5}
+//!                               {"ok":true,"msg":"mouse_button complete","button":"left","kind":"click"}
+//!                               {"ok":true,"msg":"mouse_scroll complete","dx":0,"dy":3}
 //!                               {"ok":false,"msg":"reason"}
+//!
+//! 【鼠标指令（v0.6.0+，触摸板模式）】
+//! ─────────────────────────────────────
+//! * mouse_move 是相对位移（Coordinate::Rel）。Windows 上 enigo 默认设置
+//!   `windows_subject_to_mouse_speed_and_acceleration_level = false`，相对移动
+//!   会在内部换算成绝对坐标下发，不受系统「提高指针精确度」加速度曲线干扰
+//!   ——触摸板自己的加速度曲线（手机端）因此是唯一真相，双曲线叠加会失控。
+//! * mouse_scroll 的 dx/dy 单位是「格」（滚轮 notch），enigo 语义正数 = 向下/
+//!   向右（Windows win_impl 对 WHEEL_DELTA 取负、X11 xdo 映射 Button5/7，
+//!   两端一致）。
+//! * 鼠标指令与按键指令共用「宁少勿多」：失败不重试（失败的点击可能已实际
+//!   送达，重试 = 双击），移动天然可丢（下一帧自愈）。
 //!
 //! 关于 enigo 版本：需求文档写的 0.1.30 不存在，本项目使用 0.6.1。
 //! 0.6.x 的 API 为 `Enigo::new(&Settings::default())` + `Keyboard::text()`。
@@ -71,7 +89,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use enigo::{
+    Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -96,6 +116,11 @@ const BACKSPACE_DELAY_MS: u64 = 10;
 /// 修饰键按下 / 主键敲击 / 松开之间留出间隙：部分应用（Electron、IME
 /// 活跃时）对同一毫秒内连发的键事件处理不稳。
 const HOTKEY_DELAY_MS: u64 = 15;
+/// mouse_move 单条指令 |dx|/|dy| 的上限。正常触摸板单帧增量远小于此；
+/// 异常大值只可能是上游 bug 或恶意报文，截断防指针飞出屏幕。
+const MOUSE_MOVE_MAX: i32 = 2000;
+/// mouse_scroll 单条指令每个轴的格数上限（防御异常大值）。
+const MOUSE_SCROLL_MAX: i32 = 30;
 
 /// type_text 中 '\n' 的处理方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -149,6 +174,17 @@ struct Command {
     /// `parse_modifier_name`）。
     #[serde(default)]
     modifiers: Option<Vec<String>>,
+    /// mouse_move / mouse_scroll：各轴增量（move 单位像素，scroll 单位格）。
+    #[serde(default)]
+    dx: Option<i32>,
+    #[serde(default)]
+    dy: Option<i32>,
+    /// mouse_button：目标键（left / right / middle）。
+    #[serde(default)]
+    button: Option<String>,
+    /// mouse_button：动作（click / press / release）。
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 /// 注入前的焦点校验。
@@ -479,6 +515,72 @@ fn press_combo(enigo: &mut Enigo, main: Key, modifiers: &[Key]) -> Result<(), St
     result
 }
 
+/// mouse_button 的目标键名 → enigo Button。
+fn parse_mouse_button(name: &str) -> Result<Button, String> {
+    match name {
+        "left" => Ok(Button::Left),
+        "right" => Ok(Button::Right),
+        "middle" => Ok(Button::Middle),
+        other => Err(format!("unknown mouse button: {other:?}")),
+    }
+}
+
+/// mouse_button 的动作名 → enigo 方向。
+fn parse_button_kind(name: &str) -> Result<Direction, String> {
+    match name {
+        "click" => Ok(Direction::Click),
+        "press" => Ok(Direction::Press),
+        "release" => Ok(Direction::Release),
+        other => Err(format!("unknown mouse button kind: {other:?}")),
+    }
+}
+
+/// 防御性收敛 mouse_move 增量：缺失按 0 处理，超限截断。
+fn clamp_mouse_delta(v: Option<i32>) -> i32 {
+    v.unwrap_or(0).clamp(-MOUSE_MOVE_MAX, MOUSE_MOVE_MAX)
+}
+
+/// 防御性收敛 mouse_scroll 格数：缺失按 0 处理，超限截断。
+fn clamp_scroll_ticks(v: Option<i32>) -> i32 {
+    v.unwrap_or(0).clamp(-MOUSE_SCROLL_MAX, MOUSE_SCROLL_MAX)
+}
+
+/// 执行一次相对移动（像素）。
+///
+/// 不做重试：移动天然可丢，下一帧增量自愈；重试反而放大滞后。
+fn mouse_move(enigo: &mut Enigo, dx: i32, dy: i32) -> Result<(), String> {
+    enigo
+        .move_mouse(dx, dy, Coordinate::Rel)
+        .map_err(|e| format!("mouse_move failed: {e}"))
+}
+
+/// 注入一次鼠标按键动作（click / press / release）。
+///
+/// 不做重试（与 hotkey 同理）：失败的点击可能已实际送达，重试 = 误双击。
+fn mouse_button(enigo: &mut Enigo, button: Button, kind: Direction) -> Result<(), String> {
+    enigo
+        .button(button, kind)
+        .map_err(|e| format!("mouse_button failed: {e}"))
+}
+
+/// 滚动滚轮（单位：格，正数 = 向下 / 向右）。
+///
+/// 垂直与水平分开注入（目标程序对两轴的处理常常不同）；单轴为 0 时跳过，
+/// 避免向只支持垂直滚动的老程序发无意义的 HWHEEL。
+fn mouse_scroll(enigo: &mut Enigo, dx: i32, dy: i32) -> Result<(), String> {
+    if dy != 0 {
+        enigo
+            .scroll(dy, Axis::Vertical)
+            .map_err(|e| format!("mouse_scroll vertical failed: {e}"))?;
+    }
+    if dx != 0 {
+        enigo
+            .scroll(dx, Axis::Horizontal)
+            .map_err(|e| format!("mouse_scroll horizontal failed: {e}"))?;
+    }
+    Ok(())
+}
+
 /// 处理单条指令。所有错误都转成结果 JSON，保证主循环不因单条指令退出。
 fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
     let trimmed = line.trim();
@@ -614,6 +716,116 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
                     } else {
                         format!("{}+{}", mod_names.join("+"), key_name)
                     }
+                })),
+                Err(reason) => {
+                    log_err(&reason);
+                    *enigo = None;
+                    emit(json!({ "ok": false, "msg": reason }));
+                }
+            }
+        }
+        "mouse_move" => {
+            let dx = clamp_mouse_delta(cmd.dx);
+            let dy = clamp_mouse_delta(cmd.dy);
+            if dx == 0 && dy == 0 {
+                // 零位移是触摸板合批后的常态（抖动抵消），不是错误
+                emit(json!({ "ok": true, "msg": "mouse_move complete", "dx": 0, "dy": 0 }));
+                return;
+            }
+
+            let instance = match ensure_enigo(enigo) {
+                Ok(e) => e,
+                Err(msg) => {
+                    log_err(&msg);
+                    emit(json!({ "ok": false, "msg": msg }));
+                    return;
+                }
+            };
+
+            match mouse_move(instance, dx, dy) {
+                Ok(()) => emit(json!({
+                    "ok": true, "msg": "mouse_move complete", "dx": dx, "dy": dy
+                })),
+                Err(reason) => {
+                    log_err(&reason);
+                    *enigo = None;
+                    emit(json!({ "ok": false, "msg": reason }));
+                }
+            }
+        }
+        "mouse_button" => {
+            // 参数全部先解析、后建连，无效指令不产生任何点击。
+            let Some(button) = cmd.button.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            else {
+                let msg = "mouse_button requires button";
+                log_err(msg);
+                emit(json!({ "ok": false, "msg": msg }));
+                return;
+            };
+            let Some(kind) = cmd.kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+                let msg = "mouse_button requires kind";
+                log_err(msg);
+                emit(json!({ "ok": false, "msg": msg }));
+                return;
+            };
+            let button = match parse_mouse_button(&button.to_ascii_lowercase()) {
+                Ok(b) => b,
+                Err(msg) => {
+                    log_err(&msg);
+                    emit(json!({ "ok": false, "msg": msg }));
+                    return;
+                }
+            };
+            let kind = match parse_button_kind(&kind.to_ascii_lowercase()) {
+                Ok(k) => k,
+                Err(msg) => {
+                    log_err(&msg);
+                    emit(json!({ "ok": false, "msg": msg }));
+                    return;
+                }
+            };
+
+            let instance = match ensure_enigo(enigo) {
+                Ok(e) => e,
+                Err(msg) => {
+                    log_err(&msg);
+                    emit(json!({ "ok": false, "msg": msg }));
+                    return;
+                }
+            };
+
+            match mouse_button(instance, button, kind) {
+                Ok(()) => emit(json!({
+                    "ok": true, "msg": "mouse_button complete",
+                    "button": format!("{button:?}").to_ascii_lowercase(),
+                })),
+                Err(reason) => {
+                    log_err(&reason);
+                    *enigo = None;
+                    emit(json!({ "ok": false, "msg": reason }));
+                }
+            }
+        }
+        "mouse_scroll" => {
+            let dx = clamp_scroll_ticks(cmd.dx);
+            let dy = clamp_scroll_ticks(cmd.dy);
+            if dx == 0 && dy == 0 {
+                emit(json!({ "ok": true, "msg": "mouse_scroll complete", "dx": 0, "dy": 0 }));
+                return;
+            }
+
+            let instance = match ensure_enigo(enigo) {
+                Ok(e) => e,
+                Err(msg) => {
+                    log_err(&msg);
+                    emit(json!({ "ok": false, "msg": msg }));
+                    return;
+                }
+            };
+
+            match mouse_scroll(instance, dx, dy) {
+                Ok(()) => emit(json!({
+                    "ok": true, "msg": "mouse_scroll complete", "dx": dx, "dy": dy
                 })),
                 Err(reason) => {
                     log_err(&reason);
@@ -831,5 +1043,66 @@ mod tests {
                 .expect("parse ok");
         assert_eq!(cmd.key.as_deref(), Some("return"));
         assert_eq!(cmd.modifiers, Some(vec!["shift".to_string()]));
+    }
+
+    // ── 鼠标指令 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn mouse_delta_defaults_to_zero_when_missing() {
+        assert_eq!(clamp_mouse_delta(None), 0);
+        assert_eq!(clamp_mouse_delta(Some(12)), 12);
+        assert_eq!(clamp_mouse_delta(Some(-12)), -12);
+    }
+
+    #[test]
+    fn mouse_delta_caps_absurd_values() {
+        assert_eq!(clamp_mouse_delta(Some(i32::MAX)), MOUSE_MOVE_MAX);
+        assert_eq!(clamp_mouse_delta(Some(i32::MIN)), -MOUSE_MOVE_MAX);
+    }
+
+    #[test]
+    fn scroll_ticks_default_and_cap() {
+        assert_eq!(clamp_scroll_ticks(None), 0);
+        assert_eq!(clamp_scroll_ticks(Some(3)), 3);
+        assert_eq!(clamp_scroll_ticks(Some(MOUSE_SCROLL_MAX + 1)), MOUSE_SCROLL_MAX);
+        assert_eq!(clamp_scroll_ticks(Some(-999)), -MOUSE_SCROLL_MAX);
+    }
+
+    #[test]
+    fn mouse_buttons_map_to_enigo() {
+        assert_eq!(parse_mouse_button("left"), Ok(Button::Left));
+        assert_eq!(parse_mouse_button("right"), Ok(Button::Right));
+        assert_eq!(parse_mouse_button("middle"), Ok(Button::Middle));
+        assert!(parse_mouse_button("back").is_err());
+        assert!(parse_mouse_button("").is_err());
+    }
+
+    #[test]
+    fn mouse_button_kinds_map_to_directions() {
+        assert_eq!(parse_button_kind("click"), Ok(Direction::Click));
+        assert_eq!(parse_button_kind("press"), Ok(Direction::Press));
+        assert_eq!(parse_button_kind("release"), Ok(Direction::Release));
+        assert!(parse_button_kind("double").is_err());
+        assert!(parse_button_kind("").is_err());
+    }
+
+    #[test]
+    fn command_parses_mouse_actions() {
+        let mv: Command =
+            serde_json::from_str(r#"{"action":"mouse_move","dx":12,"dy":-5}"#).expect("parse ok");
+        assert_eq!(mv.dx, Some(12));
+        assert_eq!(mv.dy, Some(-5));
+
+        let click: Command = serde_json::from_str(
+            r#"{"action":"mouse_button","button":"right","kind":"click"}"#,
+        )
+        .expect("parse ok");
+        assert_eq!(click.button.as_deref(), Some("right"));
+        assert_eq!(click.kind.as_deref(), Some("click"));
+
+        let scroll: Command =
+            serde_json::from_str(r#"{"action":"mouse_scroll","dy":3}"#).expect("parse ok");
+        assert_eq!(scroll.dx, None);
+        assert_eq!(scroll.dy, Some(3));
     }
 }
