@@ -1,8 +1,8 @@
 [package]
 name = "input-agent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "RemoteType input agent: reads single-line JSON commands on stdin and injects text into the focused window via enigo."
+description = "RemoteType input agent: reads single-line JSON commands on stdin and injects text/mouse/gamepad events into the focused window via enigo (keyboard/mouse) and vigem-client (Windows virtual X360 gamepad)."
 license = "MIT"
 
 [[bin]]
@@ -31,6 +31,10 @@ linux-x11 = ["enigo/x11rb"]
 # Windows 用 windows-sys（enigo 0.6.1 已在依赖树里拉了 0.61.2）
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# Windows 端虚拟 Xbox 360 手柄；非 Windows 平台不引用。
+# 0.1.x 是 CasualX 上 crates.io 唯一稳定版（X360 + 可选 unstable_ds4）。
+# 不开 DS4 feature：v0.7.0 scope 只有 X360。
+vigem-client = { version = "0.1", default-features = false }
 
 # Linux 独立新建 X 连接做 GetInputFocus（与 enigo 的 x11rb 连接互不干扰）
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -96,6 +96,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 mod focus;
+mod vpad;
 
 /// 单次注入的最大字符数。超过则分片，片间让出时间给目标程序的消息循环。
 /// 取值偏小是刻意的：部分 IDE / 终端在一口气注入大量字符时会丢字。
@@ -150,41 +151,69 @@ impl EnterMode {
 }
 
 /// 来自 Node 的指令。使用 `Option` 兜底可选字段。
+///
+/// `pub(crate)` 字段：vpad 子模块需要读取全部字段。
 #[derive(Debug, Deserialize)]
-struct Command {
-    action: String,
+pub(crate) struct Command {
+    pub(crate) action: String,
     #[serde(default)]
-    text: Option<String>,
+    pub(crate) text: Option<String>,
     #[serde(default)]
-    count: Option<usize>,
+    pub(crate) count: Option<usize>,
     /// 对齐模式：期望的焦点标识（首条成功注入的窗口）。与 `focus::current_focus()`
     /// 不符则拒绝注入，避免打进用户已经切走的输入框。空 / None = 不校验。
     /// v0.4.0 起校验逻辑停用（见 handle_line 的 type_text 分支），字段仅为
     /// 兼容旧版客户端的报文而保留，故允许 dead_code。
     #[serde(default)]
     #[allow(dead_code)]
-    expect_focus: Option<String>,
+    pub(crate) expect_focus: Option<String>,
     /// type_text：'\n' 的换行方式，见 `EnterMode`。缺省 raw（旧行为）。
     #[serde(default)]
-    enter_mode: Option<String>,
+    pub(crate) enter_mode: Option<String>,
     /// hotkey：主键名（"return" / "tab" / "a" / "f5" …），见 `parse_key_name`。
     #[serde(default)]
-    key: Option<String>,
+    pub(crate) key: Option<String>,
     /// hotkey：修饰键列表（shift / ctrl / alt / meta，顺序无关，别名见
     /// `parse_modifier_name`）。
     #[serde(default)]
-    modifiers: Option<Vec<String>>,
+    pub(crate) modifiers: Option<Vec<String>>,
     /// mouse_move / mouse_scroll：各轴增量（move 单位像素，scroll 单位格）。
     #[serde(default)]
-    dx: Option<i32>,
+    pub(crate) dx: Option<i32>,
     #[serde(default)]
-    dy: Option<i32>,
+    pub(crate) dy: Option<i32>,
     /// mouse_button：目标键（left / right / middle）。
     #[serde(default)]
-    button: Option<String>,
+    pub(crate) button: Option<String>,
     /// mouse_button：动作（click / press / release）。
     #[serde(default)]
-    kind: Option<String>,
+    pub(crate) kind: Option<String>,
+    // ── vpad_*（v0.7.0+ Windows 虚拟 Xbox 360 手柄）────────────────
+    /// vpad_init：驱动 slot（1..=4，缺省 1）。
+    #[serde(default)]
+    pub(crate) vpad_slot: Option<u8>,
+    /// vpad_release / vpad_button / vpad_axis / vpad_trigger / vpad_dpad：手柄标识。
+    #[serde(default)]
+    pub(crate) vpad_handle: Option<String>,
+    /// vpad_button：按钮名（a/b/x/y/lb/rb/back/start/l3/r3/guide）。
+    #[serde(default)]
+    pub(crate) vpad_button: Option<String>,
+    /// vpad_axis：轴名（lx/ly/rx/ry）。
+    #[serde(default)]
+    pub(crate) vpad_axis: Option<String>,
+    /// vpad_trigger：扳机名（lt/rt）。
+    #[serde(default)]
+    pub(crate) vpad_trigger: Option<String>,
+    /// vpad_dpad：方向（up/down/left/right/none）。
+    #[serde(default)]
+    pub(crate) vpad_dir: Option<String>,
+    /// vpad_axis / vpad_trigger：数值。
+    ///   axis ∈ [-1.0, 1.0]；trigger ∈ [0.0, 1.0]。
+    #[serde(default)]
+    pub(crate) vpad_value: Option<f64>,
+    /// vpad_button：按键 true/false。
+    #[serde(default)]
+    pub(crate) vpad_value_bool: Option<bool>,
 }
 
 /// 注入前的焦点校验。
@@ -582,7 +611,7 @@ fn mouse_scroll(enigo: &mut Enigo, dx: i32, dy: i32) -> Result<(), String> {
 }
 
 /// 处理单条指令。所有错误都转成结果 JSON，保证主循环不因单条指令退出。
-fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
+fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VPadState>) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return; // 空行直接忽略
@@ -834,6 +863,22 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>) {
                 }
             }
         }
+        // ── vpad_*（v0.7.0+ Windows 虚拟 Xbox 360 手柄）────────────────
+        // 单个 arm 覆盖所有 vpad_* action；具体解析与执行都在
+        // `vpad::dispatch` 内（详情见 src/vpad.rs 模块顶部注释）。
+        // 非 Windows：vpad::dispatch 对 status / list 走 stub 返平台，
+        // 其他动作返 `vpad requires Windows`。
+        "vpad_init" | "vpad_release" | "vpad_release_all"
+        | "vpad_button" | "vpad_axis" | "vpad_trigger" | "vpad_dpad"
+        | "vpad_list" | "vpad_status" => match vpad::dispatch(vpad, &cmd) {
+            Ok(value) => emit(value),
+            Err(msg) => {
+                log_err(&msg);
+                // 失败时保留 vpad state（不是致命错误——下一条 vpad_* 仍可走 init 重试）；
+                // 与 enigo 失败时 *enigo = None 不同，因为 vpad 状态是累积手柄表。
+                emit(json!({ "ok": false, "msg": msg }));
+            }
+        },
         "ping" => {
             // 心跳指令：仅用于 Node 侧判断子进程是否卡死。
             // 注意：这里不构造 Enigo，避免在无图形环境下心跳也失败。
@@ -897,6 +942,7 @@ fn main() {
     log_err("input-agent started, waiting for commands on stdin");
 
     let mut enigo: Option<Enigo> = None;
+    let mut vpad: Option<vpad::VPadState> = None;
 
     for line in reader.lines() {
         if !running.load(Ordering::SeqCst) {
@@ -904,7 +950,7 @@ fn main() {
             break;
         }
         match line {
-            Ok(l) => handle_line(&l, &mut enigo),
+            Ok(l) => handle_line(&l, &mut enigo, &mut vpad),
             Err(e) => {
                 // stdin 读错误通常意味着父进程已关闭管道，直接退出。
                 log_err(&format!("stdin read error: {e}"));
@@ -915,6 +961,10 @@ fn main() {
 
     // 释放 Enigo：其 Drop 会松开仍按住的按键，避免遗留按键状态。
     drop(enigo);
+    // 释放所有 vpad：每个 PadEntry 的 Drop 会调 Xbox360Wired 的 unplug，
+    // 避免进程退出时残留虚拟手柄残留进「设备与打印机」（viGEmBus 文档说明
+    // "process is killed 状态下不会自动 unplug"）。
+    drop(vpad);
     log_err("input-agent stopped");
 }
 

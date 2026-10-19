@@ -5,6 +5,38 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [Unreleased]
+
+### feat(input-agent): Windows 虚拟 Xbox 360 手柄通道（v0.7.0 协议待命）
+
+- input-agent 新增 9 个 `vpad_*` 指令族——`vpad_init` / `vpad_release` /
+  `vpad_release_all` / `vpad_button` / `vpad_axis` / `vpad_trigger` /
+  `vpad_dpad` / `vpad_list` / `vpad_status`。
+- 协议层承载于既有 stdin/stdout JSON 通道，**Node 端无任何改动**——后续要做
+  Node 端 SDK 时只需 `import agent.js + send('vpad_button', ...)`。
+- Windows 端依赖 `vigem-client 0.1.4`（CasualX 维护）通过 ViGEmBus 内核驱动
+  暴露虚拟 XInput 设备，**与 enigo 鼠标通道完全独立**——延迟、开销、错误处理
+  都各自隔离。
+- 缺失 ViGEmBus 时首次 `vpad_init` 自动调 `scripts/install-vigembus.ps1` 触发
+  UAC 安装；幂等；exit code 0/1/2/3 分级清晰。
+- 非 Windows 端编译为 stub：`vpad_status` / `vpad_list` 返回平台标识，
+  其他 `vpad_*` 返 `vpad requires Windows`，不破坏既有 Linux/macOS 的编译
+  与测试。
+
+### docs
+
+- `docs/VIGEM_FINDINGS.md`：选型依据、API 摘要、坑点（admin 安装 / Drop
+  不自动 unplug / TargetNotReady 重试）；与 `ENIGO_FINDINGS.md` 同调研笔记
+  风格。
+
+### chore
+
+- `rust/input-agent/Cargo.toml` 版本 0.1.0 → 0.2.0（伴随 `input-agent` 协议表面扩展）。
+- `scripts/install-vigembus.ps1` 新增脚本（幂等、admin 提升、ViGEmBus 服务管理）。
+
+> 注意：本次只动 Rust 端协议层；Node 端 `nx-rt` 顶层版本不在此 PR bump——v0.7.0
+> 等待 Node 端业务 SDK 就绪后再行发布。
+
 ## [0.6.1] — 2026-10-18
 
 - fix: 随包 linux-x64 二进制补到含鼠标通道的产物。0.6.0 的 npm 包里
