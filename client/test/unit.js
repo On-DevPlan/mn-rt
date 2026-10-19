@@ -18,6 +18,7 @@ const { sanitize, isInvisible, DEFAULT_MAX_LENGTH } = require('../lib/sanitize')
 const { MessageQueue } = require('../lib/queue');
 const platform = require('../lib/platform');
 const { parseArgs, resolveEnterMode } = require('../lib/config');
+const { VPadClient } = require('../lib/vpad');
 
 let pass = 0;
 let fail = 0;
@@ -800,6 +801,282 @@ test('MousePump：stop 冲刷挂起增量（优雅退出不丢最后一帧）', 
   pump.dispatch({ a: 'move', dx: 7, dy: 8 });
   pump.stop();
   assert.deepStrictEqual(sent, [{ action: 'mouse_move', dx: 7, dy: 8 }]);
+});
+
+console.log('\n== vpad：虚拟 Xbox 360 手柄 SDK ==');
+
+test('VPadClient：构造函数校验 send + defaultSlot', () => {
+  assert.throws(() => new VPadClient(), /requires opts\.send/);
+  assert.throws(
+    () => new VPadClient({ send: async () => ({ ok: true }), defaultSlot: 0 }),
+    /defaultSlot must be in 1\.\.=4/,
+  );
+  assert.throws(
+    () => new VPadClient({ send: async () => ({ ok: true }), defaultSlot: 5 }),
+    /defaultSlot must be in 1\.\.=4/,
+  );
+  // 合法
+  new VPadClient({ send: async () => ({ ok: true }) });
+});
+
+test('VPadClient：init 透传 slot + label；同 label 再调返 alreadyExisting=true', async () => {
+  const sent = [];
+  const v = new VPadClient({
+    send: async (p) => {
+      sent.push(p);
+      return { ok: true, handle: 'pad1', slot: 1 };
+    },
+  });
+  const r1 = await v.init({ slot: 1, label: 'p1' });
+  assert.deepStrictEqual(sent, [{ action: 'vpad_init', vpad_slot: 1 }]);
+  assert.deepStrictEqual(r1, { handle: 'pad1', slot: 1, label: 'p1' });
+
+  // 用 label 再调：本地缓存命中，rust 端不会再次 init
+  const r2 = await v.init({ slot: 1, label: 'p1' });
+  assert.strictEqual(r2.alreadyExisting, true);
+  assert.deepStrictEqual(sent, [{ action: 'vpad_init', vpad_slot: 1 }], 'rust 端不重发');
+  assert.strictEqual(v.stats.inits, 1);
+  assert.strictEqual(v.stats.failed, 0);
+});
+
+test('VPadClient：init 失败时抛错 + stats.failed', async () => {
+  const v = new VPadClient({
+    send: async () => ({ ok: false, msg: 'vigembus not installed; install already attempted' }),
+  });
+  await assert.rejects(() => v.init({ slot: 1 }), /vigembus not installed/);
+  assert.strictEqual(v.stats.failed, 1);
+  assert.strictEqual(v.stats.inits, 0);
+});
+
+test('VPadClient：button await rust 应答 + 字段直传', async () => {
+  const sent = [];
+  const v = new VPadClient({
+    send: async (p) => {
+      sent.push(p);
+      return {
+        ok: true,
+        msg: 'vpad button complete',
+        handle: 'pad1',
+        button: 'a',
+        value: true,
+      };
+    },
+  });
+  await v.init({ slot: 1, label: 'p1' });
+  sent.length = 0;
+  await v.button('p1', 'a', true);
+  assert.deepStrictEqual(sent, [{
+    action: 'vpad_button',
+    vpad_handle: 'pad1',
+    vpad_button: 'a',
+    vpad_value_bool: true,
+  }]);
+  assert.strictEqual(v.stats.buttons, 1);
+});
+
+test('VPadClient：buttonNow fire-and-forget；await 也立即返、send 异步完成', async () => {
+  // init 立即返，buttonNow 走 slow send（异步但不阻塞 await）
+  let resolveSlow;
+  const sendSlow = new Promise((r) => { resolveSlow = r; });
+  let slowResolveMode = false;
+  const sent = [];
+  const v = new VPadClient({
+    send: (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') return Promise.resolve({ ok: true, handle: 'pad1', slot: 1 });
+      if (slowResolveMode) return sendSlow;
+      return Promise.resolve({ ok: true });
+    },
+  });
+  await v.init({ slot: 1, label: 'p1' });
+  slowResolveMode = true;
+  // 不 await：buttonNow 应立即返回
+  v.buttonNow('p1', 'a', true);
+  assert.strictEqual(sent.length, 2, 'init + 1 press 已派发');
+  assert.strictEqual(v.stats.buttons, 0);
+  resolveSlow({ ok: true, msg: 'ok' });
+  await new Promise((r) => setImmediate(r));
+  assert.strictEqual(v.stats.buttons, 1, 'send 完成后 stats 累加');
+});
+
+test('VPadClient：buttonNow 失败仅记日志、不抛', async () => {
+  // init 返 ok；buttonNow 的 send 走 fail——必须仅记日志、不抛
+  const errs = [];
+  const v = new VPadClient({
+    send: (p) => {
+      if (p.action === 'vpad_init') return Promise.resolve({ ok: true, handle: 'pad1', slot: 1 });
+      return Promise.resolve({ ok: false, msg: 'vpad requires Windows' });
+    },
+    logger: { debug: (msg, ctx) => errs.push({ msg, ctx }) },
+  });
+  await v.init({ slot: 1, label: 'p1' });
+  v.buttonNow('p1', 'a', true);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.strictEqual(v.stats.failed, 1);
+  assert.ok(errs.some((e) => e.msg.includes('buttonNow failed')));
+});
+
+test('VPadClient：axis / trigger / dpad 字段直传', async () => {
+  const sent = [];
+  const v = new VPadClient({
+    send: async (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') return { ok: true, handle: 'pad1', slot: 1 };
+      return { ok: true };
+    },
+  });
+  await v.init({ label: 'p1' });
+  await v.axis('p1', 'lx', 0.42);
+  await v.trigger('p1', 'lt', 0.8);
+  await v.dpad('p1', 'up');
+  // 取最后三条 + 头一条（init）
+  assert.deepStrictEqual(sent.slice(1), [
+    { action: 'vpad_axis', vpad_handle: 'pad1', vpad_axis: 'lx', value: 0.42 },
+    { action: 'vpad_trigger', vpad_handle: 'pad1', vpad_trigger: 'lt', value: 0.8 },
+    { action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'up' },
+  ]);
+  assert.strictEqual(v.stats.axes, 1);
+  assert.strictEqual(v.stats.triggers, 1);
+  assert.strictEqual(v.stats.dpad, 1);
+});
+
+test('VPadClient：autoInit=true 首次无 handle 时自动分配', async () => {
+  let initSent = 0;
+  const sent = [];
+  const v = new VPadClient({
+    send: async (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') {
+        initSent += 1;
+        return { ok: true, handle: 'pad1', slot: 1 };
+      }
+      return { ok: true };
+    },
+  });
+  await v.button('auto-fresh-handle', 'a', true);
+  // 第一次引用 'auto-fresh-handle'：本地无 → 自动 init(label='auto-fresh-handle')
+  // 接着 init 返回 handle 'pad1'，但 init 把 label 关联到 pad1
+  // 第二次解析 'auto-fresh-handle' 命中 label
+  assert.strictEqual(initSent, 1, '首次操作自动 init 一次');
+  assert.deepStrictEqual(sent[0], { action: 'vpad_init', vpad_slot: 1 });
+  assert.deepStrictEqual(sent[1], {
+    action: 'vpad_button',
+    vpad_handle: 'pad1',
+    vpad_button: 'a',
+    vpad_value_bool: true,
+  });
+  await v.button('auto-fresh-handle', 'b', true);
+  assert.strictEqual(initSent, 1, 'label 已建好，后续不重复 init');
+});
+
+test('VPadClient：autoInit=false 时无 handle 抛错', async () => {
+  const v = new VPadClient({
+    send: async () => ({ ok: true, handle: 'pad1', slot: 1 }),
+    autoInit: false,
+  });
+  await assert.rejects(() => v.button('nope', 'a', true), /no active vpad handle/);
+});
+
+test('VPadClient：release 删除 label 镜像；重复 release 抛错', async () => {
+  const sent = [];
+  const v = new VPadClient({
+    send: async (p) => {
+      sent.push(p);
+      return { ok: true, msg: 'vpad released', handle: 'pad1' };
+    },
+  });
+  await v.init({ label: 'p1' });
+  await v.release('p1');
+  // label 已解绑：再 release 应抛
+  await assert.rejects(() => v.release('p1'), /unknown handle or label/);
+  // 直接用 handle 名再 release 也抛
+  await assert.rejects(() => v.release('pad1'), /unknown handle or label/);
+});
+
+test('VPadClient：releaseAll 清空 handles 与 labels；计数 +1', async () => {
+  let count;
+  const v = new VPadClient({
+    send: async (p) => {
+      if (p.action === 'vpad_init') {
+        return { ok: true, handle: `pad${(p.vpad_slot ?? 1)}`, slot: p.vpad_slot ?? 1 };
+      }
+      if (p.action === 'vpad_release_all') {
+        return { ok: true, msg: 'all vpads released', count: 2 };
+      }
+      return { ok: true };
+    },
+  });
+  await v.init({ slot: 1, label: 'a' });
+  await v.init({ slot: 2, label: 'b' });
+  const r = await v.releaseAll();
+  assert.strictEqual(r.count, 2);
+  count = r.count;
+  assert.strictEqual(v.stats.releases, 1);
+  assert.strictEqual(v._handles.size, 0);
+  assert.strictEqual(v._labels.size, 0);
+  assert.strictEqual(count, 2);
+});
+
+test('VPadClient：status / list 透传 ok:false 也累加 failed', async () => {
+  const v = new VPadClient({
+    send: async (p) => {
+      if (p.action === 'vpad_status') {
+        return { ok: false, msg: 'vpad requires Windows' };
+      }
+      return { ok: true, handles: [], count: 0 };
+    },
+  });
+  // status/list 是探测型：不抛错，直接回 rust 的原始 shape，由调用方判断 ok
+  const st = await v.status();
+  assert.deepStrictEqual(st, { ok: false, msg: 'vpad requires Windows' });
+  assert.strictEqual(v.stats.failed, 1);
+  const list = await v.list();
+  assert.deepStrictEqual(list, { ok: true, handles: [], count: 0 });
+  assert.strictEqual(v.stats.listQueries, 1);
+});
+
+test('VPadClient：dispose 失败仅记日志，不抛', async () => {
+  const v = new VPadClient({
+    send: (p) => {
+      if (p.action === 'vpad_init') return Promise.resolve({ ok: true, handle: 'pad1', slot: 1 });
+      return Promise.resolve({ ok: false, msg: 'bus gone' });
+    },
+    logger: {
+      warn: () => {}, // swallow
+    },
+  });
+  await v.init({ label: 'p1' });
+  // 不抛：dispose 内部 catch releaseAll 抛出的 Error，仅记 warn
+  let threw = false;
+  try {
+    await v.dispose();
+  } catch {
+    threw = true;
+  }
+  assert.strictEqual(threw, false, 'dispose 不得抛出');
+  // 失败不计入 releases（releaseAll 抛错在 stats 累加之前）
+  assert.strictEqual(v.stats.releases, 0);
+});
+
+test('VPadClient：高频 axisNow 100 次 → stats.axes == 100，rust 也收到 100 条', async () => {
+  const sent = [];
+  const v = new VPadClient({
+    send: (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') return Promise.resolve({ ok: true, handle: 'pad1', slot: 1 });
+      return Promise.resolve({ ok: true });
+    },
+  });
+  await v.init({ label: 'pad' });
+  for (let i = 0; i < 100; i += 1) v.axisNow('pad', 'lx', (i / 100));
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  // 1 条 vpad_init + 100 条 vpad_axis
+  assert.strictEqual(sent.length, 101);
+  assert.strictEqual(sent[0].action, 'vpad_init');
+  assert.strictEqual(sent.filter((p) => p.action === 'vpad_axis').length, 100);
+  assert.strictEqual(v.stats.axes, 100);
 });
 
 test('align：发送模式 Enter 提交后 mirror 归零（目标框已随消息清空）', () => {

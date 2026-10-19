@@ -12,6 +12,7 @@ const { Logger } = require('./logger');
 const sanitize = require('./sanitize');
 const platform = require('./platform');
 const config = require('./config');
+const { VPadClient } = require('./vpad');
 
 module.exports = {
   AgentManager,
@@ -23,5 +24,6 @@ module.exports = {
   sanitize,
   platform,
   config,
+  VPadClient,
   version: require('../package.json').version,
 };
