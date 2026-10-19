@@ -12,6 +12,7 @@
  *   remotetype auth list|switch       多人共用一台电脑：查看/切换本机已存账号
  *   remotetype auth status|logout     查看/清除本机登录凭据（logout 默认只清当前账号）
  *   remotetype doctor                 环境自检（平台/二进制/权限/网络）
+ *   remotetype install-driver         装 ViGEmBus 内核驱动（vpad_* 首次触发时也会自动跑）
  *   remotetype binary                 打印解析到的 Rust 二进制路径
  *
  * 全局参数：
@@ -79,6 +80,7 @@ ${C.bold}命令${C.reset}
   ${C.cyan}auth status${C.reset}         查看当前身份、令牌剩余有效期、本机是否已登记
   ${C.cyan}auth logout${C.reset}         清除当前账号的登录凭据（--all 清空本机全部账号）
   ${C.cyan}doctor${C.reset}              环境自检：平台支持 / 注入二进制 / 权限 / 网络
+  ${C.cyan}install-driver${C.reset}      装 ViGEmBus 内核驱动（首次 vpad_* 时也会自动触发）
   ${C.cyan}binary${C.reset}              打印解析到的注入引擎路径
 
 ${C.bold}选项${C.reset}
@@ -1279,6 +1281,111 @@ function cmdBinary(cfg) {
   }
 }
 
+// ============================ install-driver ============================
+// 仅 Windows：有 vpad_* 指令时若 ViGEmBus 驱动缺失，会自动跑这个脚本，
+// 弹一次 UAC。提前手动跑也行：npx remotetype install-driver [--check]。
+const VIGEMBUS_SYS = path.join(
+  process.env.windir || 'C:\\Windows',
+  'System32', 'drivers', 'ViGEmBus.sys',
+);
+/** npm 内的 install-vigembus.ps1 路径（dev 布局也能兜住）。 */
+function findInstallVigembusScript() {
+  const candidates = [
+    // 装在 node_modules/nx-rt/ 下（npm 全局或 npx 缓存）
+    path.join(__dirname, '..', 'scripts', 'install-vigembus.ps1'),
+    // 装在 <repo>/node_modules/nx-rt/ 下（项目内本地 install）
+    path.join(process.cwd(), 'node_modules', 'nx-rt', 'scripts', 'install-vigembus.ps1'),
+    // 兜底：v0.7.2 之前的脚本留在仓库根目录（dev 安装）
+    path.join(__dirname, '..', '..', 'scripts', 'install-vigembus.ps1'),
+  ];
+  for (const p of candidates) {
+    try { if (fs.statSync(p).isFile()) return p; } catch { /* 不存在跳 */ }
+  }
+  return null;
+}
+
+/** 包内脚本不存在时给出清晰定位提示。 */
+function cmdInstallDriverMissingScript() {
+  say(`${C.red}✗ 找不到 install-vigembus.ps1${C.reset}`);
+  say(`  安装包未自带脚本（nx-rt@0.7.0 / 0.7.1 / 0.7.1 之前）；0.7.2 起内置。`);
+  say(`  若你用的是本地 dev 安装，可手动跑：`);
+  say(`    ${C.cyan}pwsh -ExecutionPolicy Bypass -File scripts/install-vigembus.ps1${C.reset}`);
+  say(`  或去 ${C.underline}https://github.com/ViGEm/ViGEmBus/releases/latest${C.reset} 下载 MSI 自装。`);
+  process.exitCode = 2;
+}
+
+async function cmdInstallDriver(cfg, flags = {}) {
+  const script = findInstallVigembusScript();
+  const present = (() => { try { return fs.statSync(VIGEMBUS_SYS).isFile(); } catch { return false; } })();
+
+  // --check：只查不装
+  if (flags.check) {
+    if (present) {
+      say(`${C.green}✓ ViGEmBus 驱动已安装${C.reset}（${VIGEMBUS_SYS}）`);
+    } else {
+      say(`${C.yellow}! ViGEmBus 驱动未安装${C.reset}`);
+      say(`  跑 \`npx remotetype install-driver\` 一键装；vpad_* 首次使用时也会自动触发。`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (!script) {
+    cmdInstallDriverMissingScript();
+    return;
+  }
+
+  if (present) {
+    say(`${C.green}✓ ViGEmBus 驱动已安装${C.reset}（${VIGEMBUS_SYS}）— 跳过安装`);
+    return;
+  }
+
+  say(`${C.yellow}! ViGEmBus 驱动未安装${C.reset}`);
+  say(`  即将弹 UAC 提升安装 ${path.basename(script)}（脚本会装 MSI + 启服务）…`);
+  say(`  ${C.dim}提示：UAC 点"否"或超时则保持未装状态；过期不会多次弹${C.reset}`);
+
+  // 用 PowerShell Start-Process -Verb RunAs 提权子进程。
+  // 子进程退出后回退码：0=装好  1=装完服务未起  2=下载/msiexec 失败  3=非 admin
+  // Start-Process 本身在用户拒 UAC 时返回 -1，我们视作拒绝并保持 process.exitCode=2。
+  const { execFile } = require('child_process');
+  const psCmd = [
+    '$ErrorActionPreference = \'Stop\'',
+    `Start-Process -Verb RunAs -FilePath powershell.exe `,
+    `  -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${script.replace(/'/g, "''")}' `,
+    `  -Wait -PassThru -NoNewWindow `,
+    `  -ErrorAction SilentlyContinue `,
+    `  | ForEach-Object { exit [int]$_.ExitCode }`,
+    'exit 99',
+  ].join(' ');
+
+  await new Promise((resolve) => {
+    const ps = execFile('powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
+      { stdio: 'inherit' },
+      (err) => {
+        // err is non-null on non-zero exit; the only way to know the underlying
+        // elevated exit code is the parent's own exit code, which inherits.
+        // On no UAC at all (-1), PowerShell's last exit code propagates.
+        resolve(err);
+      },
+    );
+    // We can't access ps.exitCode from the callback directly because the
+    // child is Start-Process (detached). Treat err==null as success(0).
+    if (ps.exitCode === null && typeof err === 'undefined') { /* keep going */ }
+  });
+
+  // 复检
+  const after = (() => { try { return fs.statSync(VIGEMBUS_SYS).isFile(); } catch { return false; } })();
+  if (after) {
+    say(`${C.green}✓ ViGEmBus 驱动安装成功${C.reset}（${VIGEMBUS_SYS}）`);
+  } else {
+    say(`${C.red}✗ ViGEmBus 安装未生效${C.reset}`);
+    say(`  可能原因：UAC 被拒 / 取消 / 安装脚本报错。手动跑：`);
+    say(`    ${C.cyan}pwsh -ExecutionPolicy Bypass -File '${script}'${C.reset}`);
+    process.exitCode = 2;
+  }
+}
+
 // ============================ main ============================
 
 async function main() {
@@ -1305,6 +1412,8 @@ async function main() {
       return cmdTest(cfg, rest);
     case 'doctor':
       return cmdDoctor(cfg);
+    case 'install-driver':
+      return cmdInstallDriver(cfg, flags);
     case 'auth':
       return cmdAuth(cfg, rest, flags);
     case 'binary':

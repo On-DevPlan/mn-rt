@@ -5,6 +5,24 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.7.3] — 2026-10-19
+
+### feat(client): 新增 `install-driver` 子命令——一键装 ViGEmBus
+
+`remotetype install-driver [--check]` 主动提供驱动安装入口，
+之前只能被动等 `vpad_*` 首次触发时的 lazy 自动安装。
+
+- `--check`（只查不装）：打印 ViGEmBus.sys 是否存在；若没装，提示
+  下次跑 `npx remotetype install-driver` 或等 vpad_* 首次触发自动装。
+- 默认（尝试装）：检测到驱动缺失时通过 PowerShell
+  `Start-Process -Verb RunAs` 提升运行包内 scripts/install-vigembus.ps1，
+  弹一次 UAC；UAC 拒/超时则脚本不会运行、也不会无限次弹。
+- 完成后用 `fs.statSync` 复检 ViGEmBus.sys——这是权威判定，不依赖
+  PS 子进程返回码（拒绝 UAC 时 PS 默认返回 0）。
+- `--check` 是非交互的；交互只在用户主动跑不带 flag 的 `install-driver` 时发生。
+
+无 vpad 业务不会触发任何 UAC；本命令是显式 opt-in。
+
 ## [0.7.2] — 2026-10-19
 
 ### fix(client): 捆绑引擎刷至含 vpad 通道的 CI MSVC 构建 + 打包 ViGEmBus 安装脚本
