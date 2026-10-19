@@ -20,7 +20,9 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+// Ordering 只在 Windows-gated 的 INSTALL_ATTEMPTED 分支用；其他平台不引入避免 unused 警告
+#[cfg(target_os = "windows")]
+use std::sync::atomic::Ordering;
 
 use serde_json::{json, Value};
 
@@ -196,9 +198,7 @@ fn parse_cmd(cmd: &Command) -> Result<Parsed, String> {
             // 既有惯例一致。
             let slot = cmd.vpad_slot.unwrap_or(1);
             if !(1..=4).contains(&slot) {
-                return Err(format!(
-                    "vpad_init: slot must be 1..=4, got {slot}"
-                ));
+                return Err(format!("vpad_init: slot must be 1..=4, got {slot}"));
             }
             Parsed::Init { slot }
         }
@@ -773,7 +773,7 @@ fn parse_dpad(s: &str) -> Result<VPadDpad, String> {
 mod install_vigembus {
     use std::path::PathBuf;
     use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
 
     /// 进程级单次 install 标志。vpad_init 上游风暴调用时把 UAC 弹窗
     /// 压到最多 1 次；要再次尝试需重启 input-agent 进程。
