@@ -89,9 +89,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use enigo::{
-    Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
-};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -784,7 +782,11 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VP
         }
         "mouse_button" => {
             // 参数全部先解析、后建连，无效指令不产生任何点击。
-            let Some(button) = cmd.button.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            let Some(button) = cmd
+                .button
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
             else {
                 let msg = "mouse_button requires button";
                 log_err(msg);
@@ -868,17 +870,18 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VP
         // `vpad::dispatch` 内（详情见 src/vpad.rs 模块顶部注释）。
         // 非 Windows：vpad::dispatch 对 status / list 走 stub 返平台，
         // 其他动作返 `vpad requires Windows`。
-        "vpad_init" | "vpad_release" | "vpad_release_all"
-        | "vpad_button" | "vpad_axis" | "vpad_trigger" | "vpad_dpad"
-        | "vpad_list" | "vpad_status" => match vpad::dispatch(vpad, &cmd) {
-            Ok(value) => emit(value),
-            Err(msg) => {
-                log_err(&msg);
-                // 失败时保留 vpad state（不是致命错误——下一条 vpad_* 仍可走 init 重试）；
-                // 与 enigo 失败时 *enigo = None 不同，因为 vpad 状态是累积手柄表。
-                emit(json!({ "ok": false, "msg": msg }));
+        "vpad_init" | "vpad_release" | "vpad_release_all" | "vpad_button" | "vpad_axis"
+        | "vpad_trigger" | "vpad_dpad" | "vpad_list" | "vpad_status" => {
+            match vpad::dispatch(vpad, &cmd) {
+                Ok(value) => emit(value),
+                Err(msg) => {
+                    log_err(&msg);
+                    // 失败时保留 vpad state（不是致命错误——下一条 vpad_* 仍可走 init 重试）；
+                    // 与 enigo 失败时 *enigo = None 不同，因为 vpad 状态是累积手柄表。
+                    emit(json!({ "ok": false, "msg": msg }));
+                }
             }
-        },
+        }
         "ping" => {
             // 心跳指令：仅用于 Node 侧判断子进程是否卡死。
             // 注意：这里不构造 Enigo，避免在无图形环境下心跳也失败。
@@ -1114,7 +1117,10 @@ mod tests {
     fn scroll_ticks_default_and_cap() {
         assert_eq!(clamp_scroll_ticks(None), 0);
         assert_eq!(clamp_scroll_ticks(Some(3)), 3);
-        assert_eq!(clamp_scroll_ticks(Some(MOUSE_SCROLL_MAX + 1)), MOUSE_SCROLL_MAX);
+        assert_eq!(
+            clamp_scroll_ticks(Some(MOUSE_SCROLL_MAX + 1)),
+            MOUSE_SCROLL_MAX
+        );
         assert_eq!(clamp_scroll_ticks(Some(-999)), -MOUSE_SCROLL_MAX);
     }
 
@@ -1143,10 +1149,9 @@ mod tests {
         assert_eq!(mv.dx, Some(12));
         assert_eq!(mv.dy, Some(-5));
 
-        let click: Command = serde_json::from_str(
-            r#"{"action":"mouse_button","button":"right","kind":"click"}"#,
-        )
-        .expect("parse ok");
+        let click: Command =
+            serde_json::from_str(r#"{"action":"mouse_button","button":"right","kind":"click"}"#)
+                .expect("parse ok");
         assert_eq!(click.button.as_deref(), Some("right"));
         assert_eq!(click.kind.as_deref(), Some("click"));
 

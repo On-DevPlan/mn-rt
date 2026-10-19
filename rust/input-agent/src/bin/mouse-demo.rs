@@ -44,9 +44,13 @@ fn main() {
 
     // 2) 双击（两次 Click，间隔小于系统双击时间 → 由 OS 归并）
     println!("左键两次单击（应为一次双击）…");
-    enigo.button(Button::Left, Direction::Click).expect("left click failed");
+    enigo
+        .button(Button::Left, Direction::Click)
+        .expect("left click failed");
     thread::sleep(Duration::from_millis(80));
-    enigo.button(Button::Left, Direction::Click).expect("left click failed");
+    enigo
+        .button(Button::Left, Direction::Click)
+        .expect("left click failed");
 
     // 3) 滚轮：正数 = 向下
     println!("滚轮向下 3 格 → 停 1s → 向上 3 格…");
@@ -56,7 +60,9 @@ fn main() {
 
     // 4) 右键
     println!("右键单击…");
-    enigo.button(Button::Right, Direction::Click).expect("right click failed");
+    enigo
+        .button(Button::Right, Direction::Click)
+        .expect("right click failed");
 
     println!("完成。");
 }
