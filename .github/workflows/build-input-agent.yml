@@ -147,7 +147,8 @@ jobs:
       - name: 冒烟测试（Linux：校验可执行 + 协议应答）
         if: matrix.linux
         shell: bash
-        run: |          set -uo pipefail
+        run: |
+          set -uo pipefail
           BIN="dist/${{ matrix.artifact }}/${{ matrix.binary }}"
           # 注意：断言不要依赖 JSON 键顺序（serde 按字段声明顺序输出，
           # 与直觉书写顺序可能不一致），统一用 grep 做结构化匹配。
