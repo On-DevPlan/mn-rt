@@ -982,8 +982,11 @@ fn main() {
     // 释放 Enigo：其 Drop 会松开仍按住的按键，避免遗留按键状态。
     drop(enigo);
     // 释放所有 vpad：每个 PadEntry 的 Drop 会调 Xbox360Wired 的 unplug，
-    // 避免进程退出时残留虚拟手柄残留进「设备与打印机」（viGEmBus 文档说明
+    // 避免进程退出时残留虚拟手柄残留进「设备与打印机」（ViGEmBus 文档说明
     // "process is killed 状态下不会自动 unplug"）。
+    // 仅 Windows drop：非 Windows 上 VPadState 是不含字段的 ZST，不实现
+    // Drop，drop() 无意义——clippy dropping_copy_types 会报错（-D warnings）。
+    #[cfg(target_os = "windows")]
     drop(vpad);
     log_err("input-agent stopped");
 }

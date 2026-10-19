@@ -426,10 +426,11 @@ impl VPadStateInner {
                 if !install_vigembus::INSTALL_ATTEMPTED.swap(true, Ordering::SeqCst) {
                     install_vigembus::request_install()?;
                 } else {
-                    return Err(format!(
+                    return Err(
                         "vigembus not installed; install already attempted this session \
                          (rejected UAC or call failed). see docs/VIGEM_FINDINGS.md"
-                    ));
+                            .to_string(),
+                    );
                 }
                 Client::connect().map_err(|e| {
                     format!("vigembus install claimed success but connect still fails: {e}")
@@ -583,7 +584,7 @@ impl VPadStateInner {
             // 即可，不算致命。其他错误归类为硬错误。
             match e {
                 vigem_client::Error::TargetNotReady => {
-                    format!("update: target not ready yet (will retry on next call)")
+                    "update: target not ready yet (will retry on next call)".to_string()
                 }
                 other => format!("update failed: {other}"),
             }
@@ -858,10 +859,11 @@ mod install_vigembus {
                 return Ok(c.canonicalize().unwrap_or(c));
             }
         }
-        Err(format!(
+        Err(
             "install-vigembus.ps1 not found (searched near input-agent.exe and CWD); \
              manual fix: see docs/VIGEM_FINDINGS.md"
-        ))
+                .to_string(),
+        )
     }
 }
 
