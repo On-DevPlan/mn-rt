@@ -18,9 +18,15 @@
 //!
 //! main.rs 的协议入口：`pub fn dispatch(&mut Option<VPadState>, &Command) -> Result<Value, String>`。
 
+// 这三个 import 只被 Windows-gated 代码用：
+//   HashMap / Rc → VPadStateInner / PadEntry（vpad_init 握手 + 多 handle 表）
+//   Ordering     → INSTALL_ATTEMPTED 的原子读改写
+// 非 Windows 编译路径（non_win_dispatch）只需要 serde_json，故整体 gate
+// 掉，否则 clippy -D warnings 会因 unused_imports 失败。
+#[cfg(target_os = "windows")]
 use std::collections::HashMap;
+#[cfg(target_os = "windows")]
 use std::rc::Rc;
-// Ordering 只在 Windows-gated 的 INSTALL_ATTEMPTED 分支用；其他平台不引入避免 unused 警告
 #[cfg(target_os = "windows")]
 use std::sync::atomic::Ordering;
 
@@ -87,6 +93,8 @@ pub fn dispatch(state: &mut Option<VPadState>, cmd: &Command) -> Result<Value, S
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // 非 Windows 无驱动状态可管理：显式丢弃避免 unused variable 警告
+        let _ = state;
         non_win_dispatch(cmd)
     }
 }
@@ -867,8 +875,8 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     fn cmd_vpad(action: &str) -> Command {
-        serde_json::from_str(&format!(r#"{{"action":"{action}","vpad_handle":"pad1"}}"#))
-            .expect("parse test command")
+        // 非 Windows 上 vpad_* 字段不存在（Windows-only cfg），只喂 action。
+        serde_json::from_str(&format!(r#"{{"action":"{action}"}}"#)).expect("parse test command")
     }
 
     #[test]
@@ -933,7 +941,10 @@ mod tests {
         }
     }
 
+    // vpad_* 字段是 Windows-only 协议表面（见 main.rs Command 的 cfg 注释），
+    // 故这组单测同样只在 Windows 编译。
     #[test]
+    #[cfg(target_os = "windows")]
     fn command_parses_vpad_payload_fields() {
         let c: Command = serde_json::from_str(
             r#"{"action":"vpad_button","vpad_handle":"pad1","vpad_button":"a","vpad_value_bool":true}"#,
@@ -946,6 +957,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
     fn command_parses_vpad_axis_payload() {
         let c: Command = serde_json::from_str(
             r#"{"action":"vpad_axis","vpad_handle":"pad1","vpad_axis":"lx","vpad_value":0.5}"#,

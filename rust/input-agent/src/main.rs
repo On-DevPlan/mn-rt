@@ -187,32 +187,46 @@ pub(crate) struct Command {
     #[serde(default)]
     pub(crate) kind: Option<String>,
     // ── vpad_*（v0.7.0+ Windows 虚拟 Xbox 360 手柄）────────────────
+    // 全部 `#[cfg(target_os = "windows")]`：这些字段是 Windows-only 协议
+    // 表面（非 Windows 上 vpad.rs 只读 action 就返回「requires Windows」）。
+    // 若不加 gate，Linux 编译会因 dead_code 报错——字段无处被读。
+    // 非 Windows 客户端多传的 vpad_* 键会被 serde 静默忽略（本结构体未开
+    // deny_unknown_fields），所以 wire 层依旧宽容。
+    //
+    // JSON 字段名沿用 Rust 字段名（vpad_ 前缀）——vpad_button 与 mouse_button
+    // 这种碰撞没法用 serde rename 解决（同名冲突会让 rename 变 unreachable），
+    // 直接用 vpad_ 前缀更直白。
     /// vpad_init：驱动 slot（1..=4，缺省 1）。
-    /// JSON 字段名沿用 Rust 字段名（vpad_ 前缀）——vpad_button 与 mouse_button
-    /// 这种碰撞没法用 serde rename 解决（同名冲突会让 rename 变 unreachable），
-    /// 直接用 vpad_ 前缀更直白。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_slot: Option<u8>,
     /// vpad_release / vpad_button / vpad_axis / vpad_trigger / vpad_dpad：手柄标识。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_handle: Option<String>,
     /// vpad_button：按钮名（a/b/x/y/lb/rb/back/start/l3/r3/guide）。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_button: Option<String>,
     /// vpad_axis：轴名（lx/ly/rx/ry）。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_axis: Option<String>,
     /// vpad_trigger：扳机名（lt/rt）。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_trigger: Option<String>,
     /// vpad_dpad：方向（up/down/left/right/none）。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_dir: Option<String>,
     /// vpad_axis / vpad_trigger：数值。
     ///   axis ∈ [-1.0, 1.0]；trigger ∈ [0.0, 1.0]。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_value: Option<f64>,
     /// vpad_button：按键 true/false。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_value_bool: Option<bool>,
 }
