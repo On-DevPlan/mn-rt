@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
 
@@ -188,9 +189,19 @@ enum Parsed {
 #[cfg(target_os = "windows")]
 fn parse_cmd(cmd: &Command) -> Result<Parsed, String> {
     Ok(match cmd.action.as_str() {
-        "vpad_init" => Parsed::Init {
-            slot: cmd.vpad_slot.unwrap_or(1),
-        },
+        "vpad_init" => {
+            // slot 范围必须在建连前先校验——否则会先跳到 driver-connect
+            // （甚至先触发 install-vigembus.ps1）然后才在 allocate() 里报
+            // 错，浪费一次 syscalls 副作用。跨「参数全部先解析、后建连」
+            // 既有惯例一致。
+            let slot = cmd.vpad_slot.unwrap_or(1);
+            if !(1..=4).contains(&slot) {
+                return Err(format!(
+                    "vpad_init: slot must be 1..=4, got {slot}"
+                ));
+            }
+            Parsed::Init { slot }
+        }
         "vpad_release" => Parsed::Release {
             handle: require_handle(cmd)?,
         },
@@ -401,7 +412,17 @@ impl VPadStateInner {
             Ok(c) => c,
             Err(vigem_client::Error::BusNotFound) => {
                 // 驱动未装：自动跑安装脚本（弹 UAC）并重试。
-                install_vigembus::request_install()?;
+                // INSTALL_ATTEMPTED 是进程级门：上游若在启动期异常
+                // 风暴式连发 vpad_init，把 UAC 次数也压到最多 1 次。
+                // 若用户拒绝了 UAC、想再试一次，重启 input-agent 即可。
+                if !install_vigembus::INSTALL_ATTEMPTED.swap(true, Ordering::SeqCst) {
+                    install_vigembus::request_install()?;
+                } else {
+                    return Err(format!(
+                        "vigembus not installed; install already attempted this session \
+                         (rejected UAC or call failed). see docs/VIGEM_FINDINGS.md"
+                    ));
+                }
                 Client::connect().map_err(|e| {
                     format!("vigembus install claimed success but connect still fails: {e}")
                 })?
@@ -752,6 +773,11 @@ fn parse_dpad(s: &str) -> Result<VPadDpad, String> {
 mod install_vigembus {
     use std::path::PathBuf;
     use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// 进程级单次 install 标志。vpad_init 上游风暴调用时把 UAC 弹窗
+    /// 压到最多 1 次；要再次尝试需重启 input-agent 进程。
+    pub(super) static INSTALL_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
     /// 触发 UAC 安装 ViGEmBus（幂等；已装则脚本内自行快速返回 0）。
     pub(super) fn request_install() -> Result<(), String> {

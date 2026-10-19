@@ -188,6 +188,9 @@ pub(crate) struct Command {
     pub(crate) kind: Option<String>,
     // ── vpad_*（v0.7.0+ Windows 虚拟 Xbox 360 手柄）────────────────
     /// vpad_init：驱动 slot（1..=4，缺省 1）。
+    /// JSON 字段名沿用 Rust 字段名（vpad_ 前缀）——vpad_button 与 mouse_button
+    /// 这种碰撞没法用 serde rename 解决（同名冲突会让 rename 变 unreachable），
+    /// 直接用 vpad_ 前缀更直白。
     #[serde(default)]
     pub(crate) vpad_slot: Option<u8>,
     /// vpad_release / vpad_button / vpad_axis / vpad_trigger / vpad_dpad：手柄标识。
