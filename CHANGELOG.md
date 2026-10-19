@@ -5,6 +5,25 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.7.2] — 2026-10-19
+
+### fix(client): 捆绑引擎刷至含 vpad 通道的 CI MSVC 构建 + 打包 ViGEmBus 安装脚本
+
+- 0.7.0 / 0.7.1 只发了 JS 层，`binaries/` 里捆绑的还是 0.6.0 的旧引擎
+  （v0.6.0 触摸板版）——npx 用户的 `vpad_status` 会得到
+  `unknown action`，vpad 功能完全不可用。本次把 `win32-x64` 与
+  `linux-x64` 两份捆绑副本刷至 d417d74 的 CI 产物（含 vpad_* 全部
+  协议 + 三轮 CI 修复）。0.6.1 曾为 linux-x64 修过同款坑（"随包
+  linux-x64 二进制补到含鼠标通道的产物"），win32 这次一并补齐。
+- `scripts/install-vigembus.ps1` 打进 npm 包（`client/scripts/` +
+  package.json `files` 加 `scripts/`）：此前该脚本只在仓库根目录，
+  npx 场景下 `locate_script()` 向上搜索找不到，自动安装链路断在
+  最后一步。打包后路径为 `node_modules/nx-rt/scripts/install-vigembus.ps1`，
+  恰好落在 exe 向上搜索的第 3 层，自动安装闭环。
+- 新引擎冒烟：`vpad_status` → `{"ok":true,"platform":"windows",…}`；
+  缺参 `vpad_button` → 清晰校验错误；`ping` → pong。
+- bump 0.7.1 → 0.7.2。
+
 ## [0.7.1] — 2026-10-19
 
 ### feat(client): VPadClient SDK——Node 端 vpad_* 调用入口
