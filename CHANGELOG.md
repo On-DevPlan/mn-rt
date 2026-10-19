@@ -5,6 +5,37 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.7.1] — 2026-10-19
+
+### feat(client): VPadClient SDK——Node 端 vpad_* 调用入口
+
+- `client/lib/vpad.js` 新增 `VPadClient` 类，完成 v0.7.0 协议在客户端的
+  使用面：
+  - 生命周期：`init({slot, label})` / `release(handle|label)` /
+    `releaseAll()` / `dispose()`；
+  - 输入：`button` / `axis` / `trigger` / `dpad`（await 版）+ `*Now`
+    （fire-and-forget 高频版，摇杆流推荐）；
+  - 探测：`status()` / `list()`（透传 rust 原始 shape，不抛）；
+  - 句柄缓存：rust 端命名（`pad1`）↔ 用户 label 双向索引；
+  - autoInit：首次操作未 init 时按 `defaultSlot` 自动分配。
+- `client/lib/index.js` 导出 `VPadClient`。
+- `client/test/unit.js` 新增 14 条 VPadClient 单测（147 全过）。
+- 导出的 `stats` 计数器：`inits/releases/buttons/axes/triggers/dpad/
+  listQueries/statusQueries/failed`——业务侧便于观测。
+
+### fix(input-agent): vpad_init 早 slot 校验 + 单次 install 风暴防御
+
+- `vpad_init` 的 slot 范围检查从 driver connect 之后挪到参数解析前——
+  与既有「参数全部先解析、后建连」惯例一致。此前 `slot:5` 会先尝试连
+  驱动（驱动不在时还会先弹 install-vigembus.ps1 + UAC），最后才报错。
+- `INSTALL_ATTEMPTED` 进程级标志：上游若在启动期异常循环连发
+  `vpad_init`，把 UAC 弹窗次数压到最多 1 次；后续短路返明确提示
+  「已尝试，请重启进程再试」。
+
+### chore
+
+- `client/package.json` 0.7.0 → 0.7.1。
+
 ## [0.7.0] — 2026-10-19
 
 ### feat(input-agent): Windows 虚拟 Xbox 360 手柄通道
