@@ -5,9 +5,9 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
-## [Unreleased]
+## [0.7.0] — 2026-10-19
 
-### feat(input-agent): Windows 虚拟 Xbox 360 手柄通道（v0.7.0 协议待命）
+### feat(input-agent): Windows 虚拟 Xbox 360 手柄通道
 
 - input-agent 新增 9 个 `vpad_*` 指令族——`vpad_init` / `vpad_release` /
   `vpad_release_all` / `vpad_button` / `vpad_axis` / `vpad_trigger` /
@@ -34,8 +34,8 @@
 - `rust/input-agent/Cargo.toml` 版本 0.1.0 → 0.2.0（伴随 `input-agent` 协议表面扩展）。
 - `scripts/install-vigembus.ps1` 新增脚本（幂等、admin 提升、ViGEmBus 服务管理）。
 
-> 注意：本次只动 Rust 端协议层；Node 端 `nx-rt` 顶层版本不在此 PR bump——v0.7.0
-> 等待 Node 端业务 SDK 就绪后再行发布。
+> 注：`@ondevplann/input-agent-*` 子包仍在 0.2.0（手发路径，绕 2FA 单独处理）；
+> 本次仅 bump 主包 `nx-rt` 0.6.1 → 0.7.0，rust 二进制刷新随 GH Release tag 同步生效。
 
 ## [0.6.1] — 2026-10-18
 
