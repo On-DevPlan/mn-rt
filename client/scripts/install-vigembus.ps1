@@ -62,25 +62,40 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     exit 3
 }
 
-# ── 3. 下载安装器 ────────────────────────────────────────────────
-Write-Host "[install-vigembus] downloading $SETUP_URL" -ForegroundColor Cyan
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $SETUP_URL -OutFile $SETUP_LOCAL -UseBasicParsing -ErrorAction Stop
-} catch {
-    Write-Warning "[install-vigembus] download failed: $_"
+# ── 3. 取安装器：优先 npm 包内自带（零下载，抗网络瞬断），退化为官方源下载 ──
+$SETUP_VENDOR = Join-Path $PSScriptRoot 'ViGEmBus_1.22.0_x64_x86_arm64.exe'
+$SETUP_SHA256 = '89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a'
+
+function Get-Installer {
+    if (Test-Path $SETUP_VENDOR) {
+        $h = (Get-FileHash -Path $SETUP_VENDOR -Algorithm SHA256).Hash.ToLower()
+        if ($h -eq $SETUP_SHA256) {
+            Write-Host "[install-vigembus] using bundled installer: $SETUP_VENDOR" -ForegroundColor Cyan
+            return $SETUP_VENDOR
+        }
+        Write-Warning "[install-vigembus] bundled installer hash mismatch; falling back to download"
+    }
+    for ($i = 1; $i -le 3; $i++) {
+        Write-Host "[install-vigembus] downloading $SETUP_URL (attempt $i/3)" -ForegroundColor Cyan
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $SETUP_URL -OutFile $SETUP_LOCAL -UseBasicParsing -ErrorAction Stop
+            return $SETUP_LOCAL
+        } catch {
+            Write-Warning "[install-vigembus] download attempt ${i} failed: $_"
+            Start-Sleep -Seconds 2
+        }
+    }
     Write-Warning "[install-vigembus] manual fallback: download the exe from the URL above and run it with /quiet /norestart"
-    exit 2
+    return $null
 }
 
-if (-not (Test-Path $SETUP_LOCAL)) {
-    Write-Warning "[install-vigembus] installer not found after download; aborting"
-    exit 2
-}
+$setup = Get-Installer
+if (-not $setup) { exit 2 }
 
 # ── 4. 静默安装（Burn 引导器标准开关），不主动重启 ─────────────
 Write-Host "[install-vigembus] running installer (quiet, no-reboot)" -ForegroundColor Cyan
-$proc = Start-Process -FilePath $SETUP_LOCAL `
+$proc = Start-Process -FilePath $setup `
                       -ArgumentList '/quiet', '/norestart' `
                       -Wait -PassThru -NoNewWindow
 if ($proc.ExitCode -ne 0) {
