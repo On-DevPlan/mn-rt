@@ -38,7 +38,7 @@ PC 端解密后 diff 出「退格 N 次 + 插入 M 字」的按键计划，经�
 ```bash
 # ── 推荐：统一登录（免掉人工复制 key）· 0.5.3 起 ──
 npx nx-rt auth login                                # 弹浏览器登录一次（连内置服务器）
-npx nx-rt                                           # 之后裸命令直连，密钥由服务端下发
+npx nx-rt serve                                     # 之后直接连，密钥由服务端下发
 npx nx-rt auth status                               # 我是谁 / 令牌还剩多久 / 本机登记上了吗
 npx nx-rt auth login --url ws://<自建服务器>:8790/ws # 连自己部署的那台
 
@@ -199,10 +199,10 @@ remotetype serve --url ws://your-server.example.com:8790/ws
 
 **连接记忆（0.5.1 起）**：连接成功后本次的 `--url` / `--key` / `--token`（以及统一登录的
 设备令牌与会话密钥）自动存入 `~/.nx-rt/config.json`（`--no-save` 本次不落盘），
-之后**裸命令直连**：
+之后**直连**：
 
 ```bash
-npx nx-rt        # 等价 serve，用最后一次成功连接的参数
+npx nx-rt serve  # 用最后一次成功连接的参数
 ```
 
 key 会随配置一起保存——重启用同一 key，手机端无需重新配对。配置文件含凭据，勿提交仓库或外传。

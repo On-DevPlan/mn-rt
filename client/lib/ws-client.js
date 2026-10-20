@@ -120,7 +120,7 @@ class ServeClient extends EventEmitter {
         this.logger?.debug(`serve frame: ${msg.type}`, msg);
         if (msg.type === 'registered') {
           // 服务端下发的会话密钥优先采纳：它跨设备重启稳定（同一 clientId 回同一把 key），
-          // 本机自带的只是初值。采纳后落盘，下次裸命令直连不必再走登录。
+          // 本机自带的只是初值。采纳后落盘，下次 serve 直连不必再走登录。
           if (msg.sessionKey && msg.sessionKey !== this.sessionKey) {
             this.sessionKey = msg.sessionKey;
             this.emit('session-key', msg.sessionKey);

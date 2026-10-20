@@ -70,7 +70,7 @@ ${C.bold}用法${C.reset}
   npx remotetype <command> [options]
 
 ${C.bold}命令${C.reset}
-  ${C.cyan}(无命令)${C.reset}           等价 serve——连通过一次后参数已存盘，npx nx-rt 直接连
+  ${C.cyan}(无命令)${C.reset}           显示本帮助（连接请跑 serve）
   ${C.cyan}serve${C.reset}               启动守护进程：对齐模式（端到端加密，手机输入框与电脑实时对齐，含删除）
   ${C.cyan}serve --plain${C.reset}       兼容旧普通模式：只接收整句明文推送（/push 接口、外部脚本）
   ${C.cyan}test${C.reset} "<文本>"        本地测试：直接调用注入引擎，不连公网
@@ -108,7 +108,7 @@ ${C.bold}选项${C.reset}
 
 ${C.bold}示例${C.reset}
   npx remotetype auth login --url ws://1.94.101.189:8790/ws   # 统一登录，之后免配 key
-  npx remotetype                                            # 登录过一次后裸命令直连
+  npx remotetype serve                                      # 登录过一次后直连
   npx remotetype serve --url ws://1.2.3.4:8790/ws --key MYKEY123   # 旧手动配对模式
   npx remotetype serve --plain                              # 旧普通模式（接收 /push 整句推送）
   npx remotetype test "你好，这是一条本地注入测试"
@@ -679,7 +679,7 @@ async function cmdServe(cfg, flags = {}) {
     say(`${C.dim}将连接内置服务器 ${cfg.url}${C.reset}`);
     say(`${C.dim}  推荐（免配 key）：npx nx-rt auth login${C.reset}`);
     say(`${C.dim}  旧手动配对：      npx nx-rt serve --key <电脑端打印的key>${C.reset}`);
-    say(`${C.dim}连上一次后参数自动保存，之后裸命令 npx nx-rt 直接连${C.reset}`);
+    say(`${C.dim}连上一次后参数自动保存，之后 npx nx-rt serve 直接连${C.reset}`);
   }
   // 配置里还留着 0.5.2 之前那份占位地址的设备：当场说破，别抛裸 DNS 错
   const badServeUrl = placeholderUrlReason(cfg.url);
@@ -1399,11 +1399,8 @@ async function main() {
   if (flags.version || command === 'version') return printVersion();
   if (flags.help && !command) return printHelp();
   if (!command) {
-    // 裸命令 = serve：连通过一次后参数已存盘，npx nx-rt 直接连（最短路径）
-    // flags 一并传下去：--account / --key 的"显式与否"要在命令层判断，
-    // 而 loadConfig 会把显式 key 与配置里的旧 alignKey 合流成一个 cfg.sessionKey。
-    if (await maybeUpdateCheck({ flags, argv })) return undefined;
-    return cmdServe(loadConfig(flags), flags);
+    // 裸命令 = 显示帮助（0.7.6 起不再隐式 serve；连接请显式跑 npx nx-rt serve）
+    return printHelp();
   }
 
   const cfg = loadConfig(flags);

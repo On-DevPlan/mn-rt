@@ -581,7 +581,7 @@ function loadConfig(flags = {}) {
     //   'raw'（默认）旧行为；'enter' 单击 Enter；'shift_enter' 敲 Shift+Enter。
     //   后两者用于「Enter=发送」的输入框（IM、Web 聊天框）；非法值由 rust 拒绝并报错。
     enterMode: flags.enterMode ?? env.REMOTETYPE_ENTER_MODE ?? file.enterMode ?? 'raw',
-    // 连通后把 url/key/token 存入配置文件（下次裸命令直连）；--no-save 本次不落盘
+    // 连通后把 url/key/token 存入配置文件（下次 serve 直连）；--no-save 本次不落盘
     noSave: flags.noSave === true,
     configDir: configDir(),
     configFile: configFile(),
