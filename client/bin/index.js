@@ -1312,7 +1312,7 @@ function cmdInstallDriverMissingScript() {
   say(`  安装包未自带脚本（nx-rt@0.7.0 / 0.7.1 / 0.7.1 之前）；0.7.2 起内置。`);
   say(`  若你用的是本地 dev 安装，可手动跑：`);
   say(`    ${C.cyan}pwsh -ExecutionPolicy Bypass -File scripts/install-vigembus.ps1${C.reset}`);
-  say(`  或去 ${C.underline}https://github.com/ViGEm/ViGEmBus/releases/latest${C.reset} 下载 MSI 自装。`);
+  say(`  或去 ${C.underline}https://github.com/ViGEm/ViGEmBus/releases/latest${C.reset} 下载安装包（exe /quiet /norestart）自装。`);
   process.exitCode = 2;
 }
 
@@ -1343,7 +1343,7 @@ async function cmdInstallDriver(cfg, flags = {}) {
   }
 
   say(`${C.yellow}! ViGEmBus 驱动未安装${C.reset}`);
-  say(`  即将弹 UAC 提升安装 ${path.basename(script)}（脚本会装 MSI + 启服务）…`);
+  say(`  即将弹 UAC 提升安装 ${path.basename(script)}（脚本会装驱动 + 启服务）…`);
   say(`  ${C.dim}提示：UAC 点"否"或超时则保持未装状态；过期不会多次弹${C.reset}`);
 
   // 用 PowerShell Start-Process -Verb RunAs 提权子进程。

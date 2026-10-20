@@ -29,18 +29,21 @@ $ErrorActionPreference = 'Stop'
 
 # ── 路径常量 ────────────────────────────────────────────────────────
 $DRIVER_SYS = Join-Path $env:WINDIR 'System32\drivers\ViGEmBus.sys'
-$MSVC_REDIST_URL = 'https://github.com/ViGEm/ViGEmBus/releases/latest/download/ViGEmBus_Setup_x64.msi'
-$MSI_LOCAL = Join-Path $env:TEMP 'ViGEmBus_Setup_x64.msi'
+# v1.22.0 是 ViGEmBus 最终版（项目已 EOL），合并架构 exe；老脚本写死的
+# ViGEmBus_Setup_x64.msi 在任何 release 里都不存在，下载必 404。
+$SETUP_URL = 'https://github.com/ViGEm/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe'
+$SETUP_LOCAL = Join-Path $env:TEMP 'ViGEmBus_1.22.0_x64_x86_arm64.exe'
 
 # ── 1. 已装则直接退出 ─────────────────────────────────────────────
 if (Test-Path $DRIVER_SYS) {
-    # 顺手启服务；Start-Service 对已运行的 service 是幂等的（no-op）。
-    try {
-        Start-Service -Name 'ViGEmBus' -ErrorAction Stop
-    } catch {
-        # service 不存在但 sys 在——多半是持久化被破坏，再走 msiexee 的 REPAIR。
-        Write-Host "[install-vigembus] driver sys present but service missing; re-running installer" -ForegroundColor Yellow
-        # 落到 install 分支
+    $svc = Get-Service -Name 'ViGEmBus' -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -ne 'Running') {
+        # sys 在、服务没起：试着拉起（Start-Service 需 admin；失败则落安装分支修复）
+        try {
+            Start-Service -Name 'ViGEmBus' -ErrorAction Stop
+        } catch {
+            Write-Host "[install-vigembus] driver sys present but service not running; re-running installer" -ForegroundColor Yellow
+        }
     }
     if ((Get-Service -Name 'ViGEmBus' -ErrorAction SilentlyContinue).Status -eq 'Running') {
         Write-Host "[install-vigembus] ViGEmBus driver present and running" -ForegroundColor Green
@@ -60,34 +63,28 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 }
 
 # ── 3. 下载安装器 ────────────────────────────────────────────────
-Write-Host "[install-vigembus] downloading $MSVC_REDIST_URL" -ForegroundColor Cyan
+Write-Host "[install-vigembus] downloading $SETUP_URL" -ForegroundColor Cyan
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $MSVC_REDIST_URL -OutFile $MSI_LOCAL -UseBasicParsing -ErrorAction Stop
+    Invoke-WebRequest -Uri $SETUP_URL -OutFile $SETUP_LOCAL -UseBasicParsing -ErrorAction Stop
 } catch {
     Write-Warning "[install-vigembus] download failed: $_"
-    Write-Warning "[install-vigembus] manual fallback: download the MSI from the URL above and install with msiexec /i"
+    Write-Warning "[install-vigembus] manual fallback: download the exe from the URL above and run it with /quiet /norestart"
     exit 2
 }
 
-if (-not (Test-Path $MSI_LOCAL)) {
-    Write-Warning "[install-vigembus] MSI not found after download; aborting"
+if (-not (Test-Path $SETUP_LOCAL)) {
+    Write-Warning "[install-vigembus] installer not found after download; aborting"
     exit 2
 }
 
-# ── 4. 静默安装（/qn），但保留 REBOOT=R 防意外重启 ─────────────
-Write-Host "[install-vigembus] running msiexec /i (silent, no-reboot)" -ForegroundColor Cyan
-$msiArgs = @(
-    '/i', "`"$MSI_LOCAL`""
-    '/qn'                          # 完全静默
-    'REBOOT=R'                     # 不主动重启
-    'MSIFASTINSTALL=1'             # 仅必要动作
-)
-$proc = Start-Process -FilePath 'msiexec.exe' `
-                      -ArgumentList $msiArgs `
+# ── 4. 静默安装（Burn 引导器标准开关），不主动重启 ─────────────
+Write-Host "[install-vigembus] running installer (quiet, no-reboot)" -ForegroundColor Cyan
+$proc = Start-Process -FilePath $SETUP_LOCAL `
+                      -ArgumentList '/quiet', '/norestart' `
                       -Wait -PassThru -NoNewWindow
 if ($proc.ExitCode -ne 0) {
-    Write-Warning "[install-vigembus] msiexec exited with code $($proc.ExitCode)"
+    Write-Warning "[install-vigembus] installer exited with code $($proc.ExitCode)"
     exit 2
 }
 
