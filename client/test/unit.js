@@ -670,7 +670,7 @@ test('align：hotkey 空数组 / 非数组字段 → 按旧规则处理（向后
 
 // ---- 鼠标事件（v0.6.0+ 触摸板）----
 
-const { normalizeMouseOp } = require('../lib/rt-align');
+const { normalizeMouseOp, normalizeVpadOp } = require('../lib/rt-align');
 const { MousePump } = require('../lib/mouse');
 
 /** 以手机身份密封一条鼠标事件（与 sealedHotkey 同链路，明文带 mouse 字段）。 */
@@ -777,6 +777,135 @@ test('MousePump：move 合批成单条；button 前先冲刷移动（先到位�
   assert.strictEqual(pump.stats.movesSent, 1);
   assert.strictEqual(pump.stats.buttonsSent, 1);
   pump.stop();
+});
+
+// ---- 虚拟手柄（v0.7.0+ vpad_* 通道）----
+
+/** 以手机身份密封一条 vpad 指令（明文带 vpad 字段，与 hotkey/mouse 同链路）。 */
+function sealedVpad(align, vpad, seq, sid = 's1', phoneId = 'phone-e2e') {
+  const { seal, buildAad } = require('../lib/rt-crypto');
+  const plain = { vpad, ts: 0, phoneId };
+  return JSON.stringify(
+    seal(align.keyPhoneToPc, buildAad(align.room, 'p2c', seq), plain, { sid, seq }),
+  );
+}
+
+test('normalizeVpadOp：七类指令白名单归一化', () => {
+  assert.deepStrictEqual(
+    normalizeVpadOp({ action: 'vpad_init', vpad_slot: 2 }),
+    { action: 'vpad_init', vpad_slot: 2 },
+  );
+  // slot 缺省 = 1
+  assert.deepStrictEqual(normalizeVpadOp({ action: 'vpad_init' }), { action: 'vpad_init', vpad_slot: 1 });
+  assert.deepStrictEqual(
+    normalizeVpadOp({ action: 'vpad_release', vpad_handle: ' pad1 ' }),
+    { action: 'vpad_release', vpad_handle: 'pad1' },
+    'handle trim',
+  );
+  assert.deepStrictEqual(normalizeVpadOp({ action: 'vpad_release_all' }), { action: 'vpad_release_all' });
+  assert.deepStrictEqual(
+    normalizeVpadOp({ action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'A', vpad_value_bool: true }),
+    { action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: true },
+    'button 名不区分大小写，网关归一为小写',
+  );
+  assert.deepStrictEqual(
+    normalizeVpadOp({ action: 'vpad_axis', vpad_handle: 'pad1', vpad_axis: 'lx', vpad_value: 3 }),
+    { action: 'vpad_axis', vpad_handle: 'pad1', vpad_axis: 'lx', vpad_value: 1 },
+    'axis 越界钳回 [-1,1]',
+  );
+  assert.deepStrictEqual(
+    normalizeVpadOp({ action: 'vpad_trigger', vpad_handle: 'pad1', vpad_trigger: 'lt', vpad_value: 0.35 }),
+    { action: 'vpad_trigger', vpad_handle: 'pad1', vpad_trigger: 'lt', vpad_value: 0.35 },
+  );
+  assert.deepStrictEqual(
+    normalizeVpadOp({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'up' }),
+    { action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'up' },
+  );
+});
+
+test('normalizeVpadOp：非法载荷返回 null', () => {
+  assert.strictEqual(normalizeVpadOp(null), null);
+  assert.strictEqual(normalizeVpadOp('vpad_button'), null);
+  assert.strictEqual(normalizeVpadOp({ action: 'vpad_reboot' }), null);
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_button', vpad_button: 'a', vpad_value_bool: true }),
+    null,
+    '缺 handle',
+  );
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'home', vpad_value_bool: true }),
+    null,
+    '未知按钮名',
+  );
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: 1 }),
+    null,
+    'value_bool 必须是布尔',
+  );
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_init', vpad_slot: 5 }),
+    null,
+    'slot 越界',
+  );
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_axis', vpad_handle: 'pad1', vpad_axis: 'lz', vpad_value: 0 }),
+    null,
+    '未知轴名',
+  );
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_trigger', vpad_handle: 'pad1', vpad_trigger: 'rt', vpad_value: NaN }),
+    null,
+    'value NaN',
+  );
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'center' }),
+    null,
+    '回中只能用 none',
+  );
+});
+
+test('align：vpad 信封 → vpad op，不进 diff 状态机、不回 ACK', () => {
+  const { align, ops, acks } = newTestAlign(vectors.input_key);
+  assert.strictEqual(
+    align.handleIncoming(sealedVpad(align, { action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: true }, 1)),
+    'envelope',
+  );
+  assert.deepStrictEqual(ops.map((o) => o.op), ['vpad']);
+  assert.deepStrictEqual(ops[0].cmd, {
+    action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: true,
+  });
+  assert.strictEqual(align.phoneId, 'phone-e2e');
+  assert.strictEqual(acks.length, 0, '状态型指令不回 ACK');
+  assert.strictEqual(align.desiredText, null);
+  assert.strictEqual(align.mirror, '');
+  assert.strictEqual(align.busy, false);
+  assert.strictEqual(align.stats.vpadEvents, 1);
+});
+
+test('align：vpad 重复 seq 不去重（press/release 同 seq 语义合法）', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  const press = { action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'b', vpad_value_bool: true };
+  const release = { action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'b', vpad_value_bool: false };
+  align.handleIncoming(sealedVpad(align, press, 1));
+  align.handleIncoming(sealedVpad(align, release, 1));
+  assert.strictEqual(ops.length, 2);
+  assert.deepStrictEqual(ops.map((o) => o.cmd.vpad_value_bool), [true, false]);
+});
+
+test('align：非法 vpad 载荷丢弃并计数，不影响后续信封', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  assert.strictEqual(
+    align.handleIncoming(sealedVpad(align, { action: 'vpad_button' }, 1)),
+    'duplicate',
+  );
+  assert.deepStrictEqual(ops, []);
+  assert.strictEqual(align.stats.envelopesBad, 1);
+  assert.strictEqual(
+    align.handleIncoming(sealedVpad(align, { action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'left' }, 2)),
+    'envelope',
+  );
+  align.handleIncoming(sealedSync(align, '好', 3));
+  assert.deepStrictEqual(ops.map((o) => o.op), ['vpad', 'type', 'commit']);
 });
 
 test('MousePump：定时冲刷挂起增量；零增量零滚动不派发', async () => {

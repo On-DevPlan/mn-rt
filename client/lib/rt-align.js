@@ -51,6 +51,20 @@ const MOUSE_BUTTONS = new Set(['left', 'right', 'middle']);
 /** mouse_button 动作白名单 */
 const MOUSE_KINDS = new Set(['click', 'press', 'release']);
 
+/** vpad_* action 白名单（与 rust/input-agent/src/vpad.rs dispatch 对齐） */
+const VPAD_ACTIONS = new Set([
+  'vpad_init', 'vpad_release', 'vpad_release_all',
+  'vpad_button', 'vpad_axis', 'vpad_trigger', 'vpad_dpad',
+]);
+/** vpad_button 键名白名单（面键/肩键/back/start/l3/r3/guide） */
+const VPAD_BUTTONS = new Set(['a', 'b', 'x', 'y', 'lb', 'rb', 'back', 'start', 'l3', 'r3', 'guide']);
+/** vpad_axis 轴名白名单 */
+const VPAD_AXES = new Set(['lx', 'ly', 'rx', 'ry']);
+/** vpad_trigger 扳机名白名单 */
+const VPAD_TRIGGERS = new Set(['lt', 'rt']);
+/** vpad_dpad 方向白名单（none = 回中） */
+const VPAD_DIRS = new Set(['up', 'down', 'left', 'right', 'none']);
+
 /**
  * 校验并归一化手机端 mouse 载荷（v0.6.0+ 触摸板协议）。
  *
@@ -78,6 +92,69 @@ function normalizeMouseOp(m) {
     }
     case 'scroll':
       return { a: 'scroll', dx: clamp(int32(m.dx), MOUSE_SCROLL_MAX), dy: clamp(int32(m.dy), MOUSE_SCROLL_MAX) };
+    default:
+      return null;
+  }
+}
+
+/**
+ * 校验并归一化手机端 vpad_* 指令（v0.7.0+ 虚拟手柄协议）。
+ *
+ * 返回白名单化后的 payload（可直接作为 agent.send 的 body）；非法返回 null。
+ * 字段名与语义照搬 rust/input-agent/src/vpad.rs 的 parse_*：
+ *   - {action:'vpad_init', vpad_slot:1..4}
+ *   - {action:'vpad_release', vpad_handle} / {action:'vpad_release_all'}
+ *   - {action:'vpad_button', vpad_handle, vpad_button, vpad_value_bool}
+ *   - {action:'vpad_axis',   vpad_handle, vpad_axis, vpad_value:-1..1}
+ *   - {action:'vpad_trigger',vpad_handle, vpad_trigger, vpad_value:0..1}
+ *   - {action:'vpad_dpad',   vpad_handle, vpad_dir:up|down|left|right|none}
+ * rust 端按 handle 维护「上一次」累积状态，客户端只发变化字段即可。
+ */
+function normalizeVpadOp(cmd) {
+  if (cmd === null || typeof cmd !== 'object') return null;
+  const action = String(cmd.action ?? '').toLowerCase();
+  if (!VPAD_ACTIONS.has(action)) return null;
+  const handle =
+    typeof cmd.vpad_handle === 'string' ? cmd.vpad_handle.trim().slice(0, 32) : '';
+  const out = { action };
+  switch (action) {
+    case 'vpad_init': {
+      const slot = Math.round(Number(cmd.vpad_slot ?? 1));
+      if (!(slot >= 1 && slot <= 4)) return null;
+      out.vpad_slot = slot;
+      return out;
+    }
+    case 'vpad_release':
+      if (!handle) return null;
+      out.vpad_handle = handle;
+      return out;
+    case 'vpad_release_all':
+      return out;
+    case 'vpad_button': {
+      const button = String(cmd.vpad_button ?? '').trim().toLowerCase();
+      if (!VPAD_BUTTONS.has(button) || typeof cmd.vpad_value_bool !== 'boolean') return null;
+      if (!handle) return null;
+      return { ...out, vpad_handle: handle, vpad_button: button, vpad_value_bool: cmd.vpad_value_bool };
+    }
+    case 'vpad_axis': {
+      const axis = String(cmd.vpad_axis ?? '').trim().toLowerCase();
+      const v = Number(cmd.vpad_value);
+      if (!VPAD_AXES.has(axis) || !Number.isFinite(v)) return null;
+      if (!handle) return null;
+      return { ...out, vpad_handle: handle, vpad_axis: axis, vpad_value: Math.max(-1, Math.min(1, v)) };
+    }
+    case 'vpad_trigger': {
+      const trigger = String(cmd.vpad_trigger ?? '').trim().toLowerCase();
+      const v = Number(cmd.vpad_value);
+      if (!VPAD_TRIGGERS.has(trigger) || !Number.isFinite(v)) return null;
+      if (!handle) return null;
+      return { ...out, vpad_handle: handle, vpad_trigger: trigger, vpad_value: Math.max(0, Math.min(1, v)) };
+    }
+    case 'vpad_dpad': {
+      const dir = String(cmd.vpad_dir ?? '').trim().toLowerCase();
+      if (!VPAD_DIRS.has(dir) || !handle) return null;
+      return { ...out, vpad_handle: handle, vpad_dir: dir };
+    }
     default:
       return null;
   }
@@ -134,6 +211,7 @@ class RtAlignSession extends EventEmitter {
     this.stats = {
       envelopesOk: 0, envelopesBad: 0, syncsApplied: 0, acksSent: 0, plaintextRejected: 0,
       mouseEvents: 0, mouseDropped: 0,
+      vpadEvents: 0,
     };
 
     // 看门狗自驱动：commit 事件若因队列溢出等丢失，busy 会卡死（relay-client 时代由
@@ -236,6 +314,25 @@ class RtAlignSession extends EventEmitter {
       this.stats.envelopesOk += 1;
       this.stats.mouseEvents += 1;
       this.emit('op', { op: 'mouse', mouse, seq });
+      return 'envelope';
+    }
+
+    // 虚拟手柄指令（v0.7.0+ vpad_* 通道）：与 mouse 同属「事件」语义——
+    // seq 去重之前处理、不碰快照状态机、不回 ACK（按键/扳机/十字键都是
+    // 状态型指令，rust 端按 handle 维护累积状态，重放同值无副作用，但
+    // 保序由执行器的串行链保证）。载荷先过 normalizeVpadOp 白名单
+    // （字段集与 rust vpad.rs parse_* 一致），垃圾数据绝不流向 agent。
+    if (plain.vpad !== null && typeof plain.vpad === 'object') {
+      const cmd = normalizeVpadOp(plain.vpad);
+      if (cmd === null) {
+        this.stats.envelopesBad += 1;
+        this.logger?.warn('align 丢弃非法 vpad 载荷', { seq });
+        return 'duplicate';
+      }
+      this.phoneId = typeof plain.phoneId === 'string' ? plain.phoneId : '';
+      this.stats.envelopesOk += 1;
+      this.stats.vpadEvents += 1;
+      this.emit('op', { op: 'vpad', cmd, seq });
       return 'envelope';
     }
 
@@ -372,4 +469,4 @@ class RtAlignSession extends EventEmitter {
   }
 }
 
-module.exports = { RtAlignSession, looksLikeEnvelope, normalizeMouseOp };
+module.exports = { RtAlignSession, looksLikeEnvelope, normalizeMouseOp, normalizeVpadOp };

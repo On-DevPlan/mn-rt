@@ -719,6 +719,28 @@ async function cmdServe(cfg, flags = {}) {
     logger,
   });
 
+  // 虚拟手柄指令泵（vpad_*）：专用串行 Promise 链直通 agent——按键
+  // press/release 必须保序且不丢（丢 release = 手柄键卡死），当前控制面
+  // （按钮/扳机/十字键）都是低频状态型指令，串行链足够；与文本注入的
+  // 共享队列分离，互不拖延迟。轴流（摇杆 60Hz）接入时再评估合批直通。
+  let vpadChain = Promise.resolve();
+  const dispatchVpad = (cmd, seq) => {
+    vpadChain = vpadChain.then(async () => {
+      try {
+        const res = await agent.send(cmd);
+        if (res?.ok) {
+          store.append({ status: 'vpad_sent', action: cmd.action, source: 'align', seq });
+        } else {
+          logger.warn('vpad 指令失败', { action: cmd.action, msg: res?.msg, seq });
+          store.append({ status: 'vpad_failed', action: cmd.action, errorMsg: res?.msg ?? 'unknown', source: 'align', seq });
+        }
+      } catch (e) {
+        logger.warn('vpad 指令异常', { action: cmd.action, error: e.message, seq });
+        store.append({ status: 'vpad_failed', action: cmd.action, errorMsg: e.message, source: 'align', seq });
+      }
+    });
+  };
+
   // 对齐模式会话（可选）；serve 在其后创建，sendAck 闭包引用
   let align = null;
   let serve;
@@ -922,6 +944,11 @@ async function cmdServe(cfg, flags = {}) {
       // 否则会被文本/组合键的注入延时拖出可见卡顿（见 lib/mouse.js 头注释）。
       if (op.op === 'mouse') {
         mousePump.dispatch(op.mouse);
+        return;
+      }
+      // 虚拟手柄指令（v0.7.0+）：专用串行链，保序不丢，不进文本共享队列。
+      if (op.op === 'vpad') {
+        dispatchVpad(op.cmd, op.seq);
         return;
       }
       const accepted = queue.push(op, { source: 'align', enqueuedAt: Date.now() });
