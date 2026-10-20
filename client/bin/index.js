@@ -42,6 +42,7 @@ const {
   ensureClientId, generateClientId, saveAuthAccount, switchActiveAccount,
 } = require('../lib/config');
 const accountsLib = require('../lib/accounts');
+const { maybeUpdateCheck } = require('../lib/update-check');
 const { authLogin, getJson } = require('../lib/auth');
 
 const pkg = require('../package.json');
@@ -101,6 +102,7 @@ ${C.bold}选项${C.reset}
   --max-queue <n>        本地消息队列上限（默认 100）
   --max-text <n>         单条文本最大长度，超出截断（默认 5000）
   --agent <path>         手动指定注入引擎二进制路径
+  --no-update-check      启动时不检查 npm 新版本（默认 serve 前会查一次，落后则询问是否升级）
   --help                 显示帮助
   --version              显示版本
 
@@ -1400,6 +1402,7 @@ async function main() {
     // 裸命令 = serve：连通过一次后参数已存盘，npx nx-rt 直接连（最短路径）
     // flags 一并传下去：--account / --key 的"显式与否"要在命令层判断，
     // 而 loadConfig 会把显式 key 与配置里的旧 alignKey 合流成一个 cfg.sessionKey。
+    if (await maybeUpdateCheck({ flags, argv })) return undefined;
     return cmdServe(loadConfig(flags), flags);
   }
 
@@ -1407,6 +1410,7 @@ async function main() {
 
   switch (command) {
     case 'serve':
+      if (await maybeUpdateCheck({ flags, argv })) return undefined;
       return cmdServe(cfg, flags);
     case 'test':
       return cmdTest(cfg, rest);
