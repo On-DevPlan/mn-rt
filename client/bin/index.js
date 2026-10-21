@@ -960,6 +960,11 @@ async function cmdServe(cfg, flags = {}) {
     align.on('decrypt-error', ({ seq }) => {
       logger.error('解密失败：两端 key 不一致？', { seq });
     });
+
+    // 手机端首次按手柄键会让引擎自己弹 UAC 装 ViGEmBus（rust 侧独立控制台，
+    // 用户此前只看到「什么都没发生」）。这里把安装脚本写的进度转成主窗口的
+    // 日志行——两条安装路径共用进度文件，所以 serve 期间也看得见。
+    startVigembusProgressWatcher(logger);
     align.on('op', (op) => {
       // 鼠标事件（v0.6.0+ 触摸板）：高频、可丢可合并——绝不进串行队列，
       // 否则会被文本/组合键的注入延时拖出可见卡顿（见 lib/mouse.js 头注释）。
@@ -1338,6 +1343,97 @@ const VIGEMBUS_SYS = path.join(
   process.env.windir || 'C:\\Windows',
   'System32', 'drivers', 'ViGEmBus.sys',
 );
+/**
+ * 驱动安装进度通道。
+ *
+ * 提权子进程必然跑在**独立控制台**里（-Verb RunAs 的语义如此），它的
+ * stdout 到不了 nx-rt 所在终端。安装脚本因此把阶段进度逐行写进这个文件
+ *（格式 `<百分比>|<阶段说明>`），由本进程读取后渲染——CLI 路径画进度条，
+ * serve 路径打日志行。两条安装路径（install-driver / 引擎惰性触发）
+ * 共用同一个文件，所以 serve 期间也能看到手机触发的那次安装。
+ */
+const VIGEMBUS_PROGRESS_FILE = path.join(
+  process.env.TEMP || process.env.TMP || os.tmpdir(),
+  'nx-rt-vigembus-progress.log',
+);
+
+/**
+ * 读进度文件最后一行 → {pct, text}；无有效内容返回 null。 */
+const BOM = String.fromCharCode(0xfeff);
+
+/** 读进度文件最后一行 → {pct, text}；无有效内容返回 null。 */
+function readVigembusProgress() {
+  try {
+    // 剥掉可能的 UTF-8 BOM：PS 5.1 的 -Encoding utf8 会写，会让首行百分比解析成 NaN。
+    const raw = fs.readFileSync(VIGEMBUS_PROGRESS_FILE, 'utf8').replace(BOM, '').trim();
+    if (!raw) return null;
+    const last = raw.split('\n').filter(Boolean).pop();
+    const i = last.indexOf('|');
+    if (i < 0) return null;
+    const pct = Number.parseInt(last.slice(0, i), 10);
+    if (!Number.isFinite(pct)) return null;
+    return { pct, text: last.slice(i + 1).trim() };
+  } catch {
+    return null;   // 文件还没建 / 被占用：按「暂无进度」处理
+  }
+}
+
+/** 单行进度条：
+ 原地刷新，不刷屏。 */
+function drawVigembusBar(pct, text, elapsedMs) {
+  const width = 20;
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
+  const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
+  const secs = String(Math.round(elapsedMs / 1000)).padStart(2, ' ');
+  process.stdout.write(
+    `\r  ${C.cyan}${bar}${C.reset} ${String(pct).padStart(3)}%  ${text}  ${C.dim}${secs}s${C.reset}\x1b[K`,
+  );
+}
+
+/** 擦掉进度行，后续输出正常换行打印。 */
+function clearVigembusBar() {
+  process.stdout.write('\r\x1b[K');
+}
+
+/**
+ * serve 期间的驱动安装监听。
+ *
+ * 手机端首次按手柄键 → rust 引擎发现驱动缺失 → 自己弹 UAC 并在独立控制台
+ * 跑安装脚本。用户此前只看到「什么都没发生」或一个一闪而过的窗口；
+ * 这里把脚本写的进度转成主窗口的日志行。
+ *
+ * 用 mtime 做闸门：文件没变就不读内容（500ms 一次 stat 可忽略）。
+ * 启动时先吃掉文件里的存量内容，避免上报上一轮安装的残留进度。
+ */
+function startVigembusProgressWatcher(logger) {
+  if (process.platform !== 'win32') return null;
+  let lastMtime = 0;
+  let lastKey = null;
+  try {
+    lastMtime = fs.statSync(VIGEMBUS_PROGRESS_FILE).mtimeMs;
+    const pre = readVigembusProgress();
+    if (pre) lastKey = `${pre.pct}|${pre.text}`;
+  } catch { /* 文件不存在：正常 */ }
+
+  const timer = setInterval(() => {
+    let mtime;
+    try { mtime = fs.statSync(VIGEMBUS_PROGRESS_FILE).mtimeMs; } catch { return; }
+    if (mtime === lastMtime) return;
+    lastMtime = mtime;
+    const p = readVigembusProgress();
+    if (!p) return;
+    const key = `${p.pct}|${p.text}`;
+    if (key === lastKey) return;
+    lastKey = key;
+    const done = p.pct >= 100;
+    logger[done && /失败/.test(p.text) ? 'warn' : 'info'](
+      `⏳ 虚拟手柄驱动：${p.pct}% ${p.text}`,
+    );
+  }, 500);
+  timer.unref?.();
+  return timer;
+}
+
 /** npm 内的 install-vigembus.ps1 路径（dev 布局也能兜住）。 */
 function findInstallVigembusScript() {
   const candidates = [
@@ -1408,8 +1504,8 @@ async function cmdInstallDriver(cfg, flags = {}) {
     '$ErrorActionPreference = \'Stop\';',
     'try {',
     `  $p = Start-Process -Verb RunAs -FilePath powershell.exe ` +
-    `    -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${script.replace(/'/g, "''")}' ` +
-    '    -Wait -PassThru -ErrorAction Stop;',
+    `    -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${script.replace(/'/g, "''")}','-ProgressFile','${VIGEMBUS_PROGRESS_FILE.replace(/'/g, "''")}' ` +
+    '    -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop;',
     '  exit [int]$p.ExitCode;',
     '} catch {',
     // 注意：这里不能用 Write-Error —— $ErrorActionPreference='Stop' 会让
@@ -1422,6 +1518,17 @@ async function cmdInstallDriver(cfg, flags = {}) {
   ].join(' ');
 
   let exitCode = 0;
+  // 提权进程在隐藏的独立控制台里跑，进度只能靠文件回传。
+  const startedAt = Date.now();
+  let lastPct = -1;
+  const barTimer = setInterval(() => {
+    const p = readVigembusProgress();
+    if (!p || p.pct === lastPct) return;
+    lastPct = p.pct;
+    drawVigembusBar(p.pct, p.text, Date.now() - startedAt);
+  }, 250);
+  barTimer.unref?.();
+  try {
   await new Promise((resolve) => {
     execFile('powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
@@ -1436,6 +1543,11 @@ async function cmdInstallDriver(cfg, flags = {}) {
       },
     );
   });
+
+  } finally {
+    clearInterval(barTimer);
+    clearVigembusBar();
+  }
 
   // 复检（权威判定：驱动文件在不在，而不是脚本报的什么）
   const after = (() => { try { return fs.statSync(VIGEMBUS_SYS).isFile(); } catch { return false; } })();

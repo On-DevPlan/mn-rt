@@ -815,17 +815,20 @@ mod install_vigembus {
         // 这里不判断父进程是否已经管理员——已经管理员时 -Verb RunAs 仍是 no-op
         // 升级（直接同意则立即返回）。
         //
-        // catch 里刻意用 [Console]::Error.WriteLine 而非 Write-Error：
-        // $ErrorActionPreference='Stop' 会让 catch 中的 Write-Error 变成终止性
-        // 错误，脚本当场以 1 退出、走不到 exit 98，用户只会看到含糊的「退出码 1」
-        // （提权被拒 vs 脚本自身报错无法区分）。
+        // -WindowStyle Hidden：提权必然新开控制台（Windows 不允许提权既有进程），
+        // 藏掉它以免手机一按键就闪出一个黑窗口抢焦点。进度不依赖 stdout——
+        // 脚本写进度文件，由 nx-rt 主进程读取后渲染在它自己的窗口里。
+        //
+        // 注意：不加 -NoNewWindow（与 -Verb 互斥，会报 AmbiguousParameterSet）；
+        // 不要用 Write-Error（$ErrorActionPreference='Stop' 下 catch 里的
+        // Write-Error 本身会终止脚本、退化成退出码 1，提权失败无法与脚本报错区分）。
         let escaped = script.to_string_lossy().replace('\'', "''");
         let ps_cmd = format!(
             "$ErrorActionPreference='Stop'; \
              try {{ \
                $p = Start-Process -FilePath '{ps_host}' \
                       -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{escaped}') \
-                      -Verb RunAs -PassThru -Wait -ErrorAction Stop; \
+                      -Verb RunAs -WindowStyle Hidden -PassThru -Wait -ErrorAction Stop; \
                exit [int]$p.ExitCode \
              }} catch {{ \
                [Console]::Error.WriteLine('elevation failed: ' + $_.Exception.Message); \
