@@ -32,6 +32,9 @@ class LocalStore {
       durationMs: entry.durationMs ?? null,
       truncated: entry.truncated ?? false,
       source: entry.source ?? null,
+      // vpad_* 记录靠这个字段区分是哪条指令——固定 schema 之前把它丢掉了，
+      // 排查时只能看到「有条 vpad 记录」，看不出是 button 还是 dpad。
+      action: entry.action ?? null,
     };
     if (this.disabled) return record;
     try {

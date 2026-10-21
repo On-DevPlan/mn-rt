@@ -27,6 +27,15 @@
 
 $ErrorActionPreference = 'Stop'
 
+# 留痕：提权子进程会新开控制台，调用方（Node / rust 引擎）拿不到 stdout，
+# 失败原因会彻底黑盒。把本次执行的输出同时落到日志文件，供事后排查。
+$TranscriptPath = Join-Path $env:TEMP 'mn-rt-vigembus-install.log'
+try {
+  Start-Transcript -Path $TranscriptPath -Append -Force | Out-Null
+} catch {
+  # 转录失败不影响安装主流程
+}
+
 # ── 路径常量 ────────────────────────────────────────────────────────
 $DRIVER_SYS = Join-Path $env:WINDIR 'System32\drivers\ViGEmBus.sys'
 # v1.22.0 是 ViGEmBus 最终版（项目已 EOL），合并架构 exe；老脚本写死的
@@ -63,12 +72,22 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 }
 
 # ── 3. 取安装器：优先 npm 包内自带（零下载，抗网络瞬断），退化为官方源下载 ──
-$SETUP_VENDOR = Join-Path $PSScriptRoot 'ViGEmBus_1.22.0_x64_x86_arm64.exe'
+#
+# ⚠️ 不要用 `Join-Path $PSScriptRoot ...`：rust 引擎用
+# std::env::current_exe() 拼脚本路径，Windows 上带 `\\?\` verbatim 前缀；
+# Join-Path 解析不了这种路径（报「参数 drive 的值为空」），脚本会在这里
+# 直接终止失败、退出码 1，而调用方（提权子进程）拿不到输出、只看到
+# "exited with code 1"。字符串拼接对 verbatim 路径是安全的。
+$ScriptDir = $PSScriptRoot
+if (-not $ScriptDir) {
+    try { $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path } catch { $ScriptDir = $null }
+}
+$SETUP_VENDOR = if ($ScriptDir) { "$ScriptDir\ViGEmBus_1.22.0_x64_x86_arm64.exe" } else { $null }
 $SETUP_SHA256 = '89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a'
 
 function Get-Installer {
-    if (Test-Path $SETUP_VENDOR) {
-        $h = (Get-FileHash -Path $SETUP_VENDOR -Algorithm SHA256).Hash.ToLower()
+    if ($SETUP_VENDOR -and (Test-Path -LiteralPath $SETUP_VENDOR)) {
+        $h = (Get-FileHash -LiteralPath $SETUP_VENDOR -Algorithm SHA256).Hash.ToLower()
         if ($h -eq $SETUP_SHA256) {
             Write-Host "[install-vigembus] using bundled installer: $SETUP_VENDOR" -ForegroundColor Cyan
             return $SETUP_VENDOR

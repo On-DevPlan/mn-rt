@@ -724,11 +724,32 @@ async function cmdServe(cfg, flags = {}) {
   // （按钮/扳机/十字键）都是低频状态型指令，串行链足够；与文本注入的
   // 共享队列分离，互不拖延迟。轴流（摇杆 60Hz）接入时再评估合批直通。
   let vpadChain = Promise.resolve();
+  // 引擎分配的句柄名未必等于手机端写的 vpad_handle：rust 端 next_index 单调
+  // 自增，且 release_all 清表时计数器不复位 → 第二次 init 拿到 pad2/pad3…，
+  // 而手机端把句柄写死 pad1（fr rt_page.dart 的 _vpadHandle，依赖「release_all
+  // → init 必得 pad1」这条契约）。结果是 init 成功、后续按钮/十字键全撞
+  // "unknown handle: pad1"。这里记住 init 应答里的真实句柄，后续命令一律
+  // 重写到它；release 成功后清空，下次 init 重新学。
+  let vpadHandle = null;
   const dispatchVpad = (cmd, seq) => {
     vpadChain = vpadChain.then(async () => {
       try {
-        const res = await agent.send(cmd);
+        const payload = vpadHandle && cmd.vpad_handle
+          ? { ...cmd, vpad_handle: vpadHandle }
+          : cmd;
+        const res = await agent.send(payload);
         if (res?.ok) {
+          if (cmd.action === 'vpad_init' && res.handle) vpadHandle = res.handle;
+          if (cmd.action === 'vpad_release' || cmd.action === 'vpad_release_all') {
+            vpadHandle = null;
+          }
+          // vpad 全链路成功时此前零 console 输出（store 只落盘不打印），
+          // 排障时无法区分「没收到」和「收到了但静默」。init / release 是
+          // 一次性节点走 info（「手柄已插上/拔下」一眼可见）；按键/轴/扳机
+          // 高频走 debug，避免游戏时刷屏。
+          const log = (cmd.action === 'vpad_init' || cmd.action === 'vpad_release')
+            ? 'info' : 'debug';
+          logger[log]('vpad 指令成功', { action: cmd.action, msg: res?.msg, seq });
           store.append({ status: 'vpad_sent', action: cmd.action, source: 'align', seq });
         } else {
           logger.warn('vpad 指令失败', { action: cmd.action, msg: res?.msg, seq });
@@ -1374,43 +1395,67 @@ async function cmdInstallDriver(cfg, flags = {}) {
   say(`  ${C.dim}提示：UAC 点"否"或超时则保持未装状态；过期不会多次弹${C.reset}`);
 
   // 用 PowerShell Start-Process -Verb RunAs 提权子进程。
-  // 子进程退出后回退码：0=装好  1=装完服务未起  2=下载/msiexec 失败  3=非 admin
-  // Start-Process 本身在用户拒 UAC 时返回 -1，我们视作拒绝并保持 process.exitCode=2。
+  // 子进程退出码约定（install-vigembus.ps1）：
+  //   0=装好  1=装完服务未起  2=下载/安装器失败  3=非 admin
+  // 提权本身失败（用户拒 UAC / 取消）由本层用 98 表达。
+  //
+  // ⚠️ 不要再加 -NoNewWindow：它与 -Verb RunAs 是互斥参数集
+  //（Start-Process 报 AmbiguousParameterSet），且该错误一旦被
+  // -ErrorAction SilentlyContinue 吞掉，安装压根没执行、退出码退化成 99，
+  // 表现为「UAC 被拒」——实际是根本没弹 UAC。提权只能新开控制台。
   const { execFile } = require('child_process');
   const psCmd = [
-    '$ErrorActionPreference = \'Stop\'',
-    `Start-Process -Verb RunAs -FilePath powershell.exe `,
-    `  -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${script.replace(/'/g, "''")}' `,
-    `  -Wait -PassThru -NoNewWindow `,
-    `  -ErrorAction SilentlyContinue `,
-    `  | ForEach-Object { exit [int]$_.ExitCode }`,
-    'exit 99',
+    '$ErrorActionPreference = \'Stop\';',
+    'try {',
+    `  $p = Start-Process -Verb RunAs -FilePath powershell.exe ` +
+    `    -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${script.replace(/'/g, "''")}' ` +
+    '    -Wait -PassThru -ErrorAction Stop;',
+    '  exit [int]$p.ExitCode;',
+    '} catch {',
+    // 注意：这里不能用 Write-Error —— $ErrorActionPreference='Stop' 会让
+    // catch 里的 Write-Error 本身变成终止性错误，脚本当场以 1 退出，
+    // 永远走不到下面的 exit 98（提权失败会被误报成「服务未起」）。
+    // [Console]::Error.WriteLine 直写 stderr，不经过 PowerShell 错误机制。
+    "  [Console]::Error.WriteLine('elevation failed: ' + $_.Exception.Message);",
+    '  exit 98;',
+    '}',
   ].join(' ');
 
+  let exitCode = 0;
   await new Promise((resolve) => {
-    const ps = execFile('powershell.exe',
+    execFile('powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psCmd],
       { stdio: 'inherit' },
       (err) => {
-        // err is non-null on non-zero exit; the only way to know the underlying
-        // elevated exit code is the parent's own exit code, which inherits.
-        // On no UAC at all (-1), PowerShell's last exit code propagates.
-        resolve(err);
+        // 非零退出时 err.code 就是子进程退出码（正常退出时是数字）。
+        // err.code 为字符串（ENOENT 之类）时按 99 兜底。
+        exitCode = err
+          ? (typeof err.code === 'number' ? err.code : 99)
+          : 0;
+        resolve();
       },
     );
-    // We can't access ps.exitCode from the callback directly because the
-    // child is Start-Process (detached). Treat err==null as success(0).
-    if (ps.exitCode === null && typeof err === 'undefined') { /* keep going */ }
   });
 
-  // 复检
+  // 复检（权威判定：驱动文件在不在，而不是脚本报的什么）
   const after = (() => { try { return fs.statSync(VIGEMBUS_SYS).isFile(); } catch { return false; } })();
   if (after) {
     say(`${C.green}✓ ViGEmBus 驱动安装成功${C.reset}（${VIGEMBUS_SYS}）`);
+    if (exitCode === 1) {
+      say(`${C.yellow}! 驱动文件已就位但服务未启动${C.reset}——重启后自愈，或手动：`);
+      say(`    ${C.cyan}sc start ViGEmBus${C.reset}`);
+    }
   } else {
-    say(`${C.red}✗ ViGEmBus 安装未生效${C.reset}`);
-    say(`  可能原因：UAC 被拒 / 取消 / 安装脚本报错。手动跑：`);
-    say(`    ${C.cyan}pwsh -ExecutionPolicy Bypass -File '${script}'${C.reset}`);
+    say(`${C.red}✗ ViGEmBus 安装未生效${C.reset}（退出码 ${exitCode}）`);
+    const reasons = {
+      98: '提权失败：UAC 被拒绝或已取消',
+      2: '安装器下载或执行失败（网络 / 哈希校验 / 安装器本身报错）',
+      3: '当前不是管理员，无法安装内核驱动',
+      1: '脚本退出码 1：驱动文件已装但服务未启动（也可能是脚本自身报错，见上方输出）',
+    };
+    if (reasons[exitCode]) say(`  原因：${reasons[exitCode]}`);
+    else say('  原因：未知（详见上方脚本输出）');
+    say(`  手动跑：${C.cyan}pwsh -ExecutionPolicy Bypass -File '${script}'${C.reset}`);
     process.exitCode = 2;
   }
 }

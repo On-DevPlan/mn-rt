@@ -8,7 +8,8 @@
 //!   * 单连接（`vigem_client::Client`，由 `Rc` 持有）+ 多 handle（每个 handle
 //!     一份 `Xbox360Wired<Rc<Client>>`），共享同一 Client 以节约驱动 slot
 //!     （驱动最多允许 4 个手柄）。
-//!   * 状态懒初始化：首次 `vpad_*` 触发时连驱动并创建首个手柄（默认 slot=1）。
+//!   * 状态懒初始化：首次 `vpad_*` 触发时连驱动（**不**顺手建手柄——手柄一律
+//!     由 vpad_init 分配，否则一次 init 会多出一个没人 release 的幽灵设备）。
 //!     后续 `vpad_init(slot=N)` 可追加更多手柄。
 //!   * 持久化状态：每个 handle 维护一份「上一次」的完整按钮 + 轴 + 扳机值，
 //!     每次 `vpad_button` / `vpad_axis` 都基于上一次的全局状态更新——避免
@@ -153,11 +154,7 @@ fn win_dispatch(state: &mut Option<VPadState>, cmd: &Command) -> Result<Value, S
         "vpad_init" | "vpad_release" | "vpad_button" | "vpad_axis" | "vpad_trigger"
         | "vpad_dpad" => {
             let parsed = parse_cmd(cmd)?;
-            let init_slot = match parsed {
-                Parsed::Init { slot } => slot,
-                _ => 1,
-            };
-            ensure_state(state, init_slot)?;
+            ensure_state(state)?;
             let s = state.as_mut().expect("vpad state just initialized");
             execute(s, parsed)
         }
@@ -346,9 +343,9 @@ fn execute(s: &mut VPadState, parsed: Parsed) -> Result<Value, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn ensure_state(state: &mut Option<VPadState>, init_slot: u8) -> Result<(), String> {
+fn ensure_state(state: &mut Option<VPadState>) -> Result<(), String> {
     if state.is_none() {
-        let inner = VPadStateInner::try_init(init_slot)?;
+        let inner = VPadStateInner::try_init()?;
         *state = Some(VPadState { inner });
     }
     Ok(())
@@ -415,7 +412,7 @@ fn clamp_value(v: Option<f64>, label: &str, lo: f64, hi: f64) -> Result<f32, Str
 
 #[cfg(target_os = "windows")]
 impl VPadStateInner {
-    fn try_init(slot: u8) -> Result<Self, String> {
+    fn try_init() -> Result<Self, String> {
         let client = match Client::connect() {
             Ok(c) => c,
             Err(vigem_client::Error::BusNotFound) => {
@@ -440,13 +437,16 @@ impl VPadStateInner {
         };
 
         let client = Rc::new(client);
-        let mut me = Self {
+        let me = Self {
             client,
             handles: HashMap::new(),
             next_index: 1,
         };
-        // 一次启动就建好第一个手柄（默认 slot=1）。
-        me.allocate(slot)?;
+        // 注意：这里**不**预建手柄。预建会让一次 vpad_init 分配两个设备
+        // （try_init 一个 + execute 一个），而手机端只认 init 应答里的那个，
+        // 多出来的那个永远不会被 release → 系统里留下幽灵手柄
+        // （ViGEmBus 在进程被 kill 时也不会自动 unplug）。
+        // 手柄一律由 execute(Parsed::Init) 分配，句名从 pad1 起。
         Ok(me)
     }
 
@@ -492,11 +492,19 @@ impl VPadStateInner {
             return Err(format!("unknown handle: {handle}"));
         }
         // drop(PadEntry) → drop(Xbox360Wired) → unplug
+        // 最后一个句柄释放后把计数器归位：句柄名要可复用，手机端才能依赖
+        // 「release_all → init 必得 pad1」这条契约（fr rt_page.dart 的
+        // _vpadHandle 写死 pad1）。计数器只增不减会让第二次 init 拿到 pad2，
+        // 手机后续指令全部撞 "unknown handle: pad1"。
+        if self.handles.is_empty() {
+            self.next_index = 1;
+        }
         Ok(())
     }
 
     fn release_all(&mut self) {
         self.handles.clear();
+        self.next_index = 1;
     }
 
     fn apply_button(
@@ -806,27 +814,64 @@ mod install_vigembus {
         // 用 Start-Process -Verb RunAs 让脚本以管理员身份跑。
         // 这里不判断父进程是否已经管理员——已经管理员时 -Verb RunAs 仍是 no-op
         // 升级（直接同意则立即返回）。
+        //
+        // catch 里刻意用 [Console]::Error.WriteLine 而非 Write-Error：
+        // $ErrorActionPreference='Stop' 会让 catch 中的 Write-Error 变成终止性
+        // 错误，脚本当场以 1 退出、走不到 exit 98，用户只会看到含糊的「退出码 1」
+        // （提权被拒 vs 脚本自身报错无法区分）。
         let escaped = script.to_string_lossy().replace('\'', "''");
         let ps_cmd = format!(
             "$ErrorActionPreference='Stop'; \
-             $p = Start-Process -FilePath '{ps_host}' \
-                    -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{escaped}') \
-                    -Verb RunAs -PassThru -Wait; \
-             exit $p.ExitCode"
+             try {{ \
+               $p = Start-Process -FilePath '{ps_host}' \
+                      -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{escaped}') \
+                      -Verb RunAs -PassThru -Wait -ErrorAction Stop; \
+               exit [int]$p.ExitCode \
+             }} catch {{ \
+               [Console]::Error.WriteLine('elevation failed: ' + $_.Exception.Message); \
+               exit 98 \
+             }}"
         );
         let out = Command::new("powershell.exe")
             .args(["-NoProfile", "-Command", &ps_cmd])
             .output()
             .map_err(|e| format!("spawn powershell.exe: {e}"))?;
         if !out.status.success() {
+            let code = out.status.code();
+            // 98 = 提权本身失败（用户拒 UAC / 超时 / 策略拦截），
+            // 与脚本自身的退出码（0/1/2/3）区分开。
+            let hint = if code == Some(98) {
+                "提权失败：UAC 被拒绝或已取消——再试需重新触发 vpad_*（本次会话只弹一次）"
+            } else {
+                "see docs/VIGEM_FINDINGS.md"
+            };
             return Err(format!(
-                "install-vigembus.ps1 exited with code {:?}\nstderr: {}\n\
-                 see docs/VIGEM_FINDINGS.md",
-                out.status.code(),
+                "install-vigembus.ps1 exited with code {code:?}\nstderr: {}\n{hint}",
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
         Ok(())
+    }
+
+    /// 去掉 Windows 的 verbatim（`\\?\`）路径前缀。
+    ///
+    /// `std::env::current_exe()` 在 Windows 上返回带 `\\?\` 前缀的路径，
+    /// 拼出来的脚本路径也就带着它。而 PowerShell 的 `Join-Path` 解析不了
+    /// verbatim 路径（报「参数 drive 的值为空」），安装脚本会在解析包内
+    /// 安装器路径时终止失败、退出码 1——而提权子进程的输出调用方拿不到，
+    /// 最终只表现为「install-vigembus.ps1 exited with code 1」。
+    ///
+    /// 剥掉前缀后路径是常规形式，PowerShell / cmd / 文件 API 全都认。
+    fn strip_verbatim(path: PathBuf) -> PathBuf {
+        let raw = path.to_string_lossy().to_string();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            // verbatim UNC：\\?\UNC\server\share → \\server\share
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+        path
     }
 
     fn locate_script() -> Result<PathBuf, String> {
@@ -839,10 +884,18 @@ mod install_vigembus {
         let candidates: Vec<PathBuf> = {
             let mut v = Vec::new();
             if let Ok(exe) = std::env::current_exe() {
+                // current_exe 带 \\?\ 前缀，先剥掉——否则下面拼出来的路径
+                // 交给 PowerShell 会踩 Join-Path 的坑（见 strip_verbatim）。
+                let exe = strip_verbatim(exe);
                 let mut dir = exe.parent().map(|p| p.to_path_buf());
                 for _ in 0..6 {
                     if let Some(d) = dir.as_ref() {
                         v.push(d.join("scripts/install-vigembus.ps1"));
+                        // 仓库布局：<repo>/client/scripts/ 才是随包分发的脚本所在
+                        // （<repo>/scripts/ 只是历史副本，且没有随包安装器——
+                        //  走那份会退化成联网下载，国内网络下必挂）。
+                        v.push(d.join("client/scripts/install-vigembus.ps1"));
+                        v.push(d.join("node_modules/nx-rt/scripts/install-vigembus.ps1"));
                         dir = d.parent().map(|p| p.to_path_buf());
                     } else {
                         break;
@@ -856,7 +909,7 @@ mod install_vigembus {
         };
         for c in candidates {
             if c.is_file() {
-                return Ok(c.canonicalize().unwrap_or(c));
+                return Ok(strip_verbatim(c.canonicalize().unwrap_or(c)));
             }
         }
         Err(
