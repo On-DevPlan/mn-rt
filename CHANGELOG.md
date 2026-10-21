@@ -5,6 +5,91 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.7.9] — 2026-10-21
+
+### fix(client): vpad 入站解析补发——此前**从未进入任何已发布版本**
+
+`3d169be` 给 rt-align 加了 vpad 入站分支（手机 `vpad_*` 信封 → op → 引擎），
+但版本号没跟着 bump，代码没进过 npm：已发布的 0.7.0–0.7.8 里
+`lib/rt-align.js` 一行 vpad 都没有。手机发的 vpad 包被当未知字段**静默丢弃**
+——无 op、无日志、无报错，PC 端 `records.jsonl` 里一条 vpad 记录都不会出现，
+虚拟手柄永远不出现，Steam 也就识别不到。
+
+症状与排查成本都极不对称：引擎无罪（ViGEmBus 正常、捆绑二进制含 vpad 通道），
+驱动无罪（`vpad_status` 正常应答），服务端也无罪（转发记录全是 `forwarded`），
+唯一断点在客户端解析层，且**不打任何日志**。
+
+### fix(client): vpad 句名映射——手机写死 `pad1`，引擎发的名字未必是它
+
+rust 端句柄名由单调自增的 `next_index` 生成（`pad1`→`pad2`→…），且
+`release_all` 清表时**不复位**。手机端把句柄写死 `pad1`（fr `rt_page.dart`
+的 `_vpadHandle`，依赖「release_all → init 必得 pad1」这条契约），于是
+**第二次** init 拿到 `pad2` 之后，手机后续所有按钮/十字键指令全撞
+`unknown handle: pad1`——表现为「init 成功但手柄完全没反应」。
+
+客户端现在记住 `vpad_init` 应答里的真实句柄（`handle` 字段），后续命令一律
+重写到它；`vpad_release` / `vpad_release_all` 成功后清空，下次 init 重新学。
+rust 侧同时治本：全部句柄释放后 `next_index` 归 1，引擎自己兑现那条契约。
+
+### feat(client): vpad 指令成功不再静默
+
+`dispatchVpad` 此前只在失败时打 warn，成功只落盘不打印——排障时无法区分
+「没收到」和「收到了但静默」。现在 `vpad_init` / `vpad_release` 走 INFO
+（「虚拟手柄已插上/拔下」一眼可见），按钮/轴/扳机等高频动作走 DEBUG，
+避免游戏时刷屏。
+
+### fix(client): `install-driver` 的提权包装此前**必然失败**
+
+`Start-Process -Verb RunAs` 与 `-NoNewWindow` 是互斥参数集（PowerShell 报
+`AmbiguousParameterSet`）。原代码两个都写上了，又用 `-ErrorAction SilentlyContinue`
+把错误吞掉 → 管道无输出 → 落到 `exit 99` → 上层打印「UAC 被拒 / 取消 / 脚本报错」。
+真相是**安装压根没执行、UAC 压根没弹**，而 `vpad_status` 之类的前置检查看起来
+一切正常。
+
+现在：去掉 `-NoNewWindow`（提权只能新开控制台），并把子进程退出码读出来，
+按 98=提权被拒 / 2=安装器失败 / 3=非管理员 / 1=服务未起 分别给出原因。
+
+### fix(client): 惰性安装路径此前**必然失败**（`\\?\` verbatim 路径）
+
+`std::env::current_exe()` 在 Windows 上返回带 `\\?\` 前缀的 verbatim 路径，
+拼出来的 `install-vigembus.ps1` 路径也带着它。而 PowerShell 的
+`Join-Path $PSScriptRoot ...` 解析不了 verbatim 路径（报「参数 drive 的值为空」），
+脚本在该行直接终止、退出码 1；提权子进程在另一个控制台里跑，调用方拿不到输出，
+最终只表现为「install-vigembus.ps1 exited with code 1」。
+
+三处同时修：
+- rust `locate_script()` 剥掉 `\\?\`（含 `\\?\UNC\`）前缀再交给 PowerShell；
+- 脚本改用字符串拼接（`"$ScriptDir\xxx.exe"`）而非 `Join-Path`——**脚本随 npm 包
+  发布，这一处改完，已发布版本的惰性路径立刻可用，不必等二进制重出**；
+- `locate_script()` 补 `client/scripts/`、`node_modules/nx-rt/scripts/` 候选，
+  开发布局不再退化成「联网下载安装器」（国内网络下必挂）。
+
+### fix(input-agent): `vpad_init` 一次分配两个手柄 → 系统里留幽灵设备
+
+`try_init()` 建驱动连接时顺手建了第一个手柄，`execute(Parsed::Init)` 又建一个，
+于是一次 init 占两个驱动 slot，其中一个手机端永远不会 release——进程被 kill 时
+ViGEmBus 也不自动 unplug，系统里就留下 `Status=Unknown` 的幽灵手柄，Steam 枚举
+时可能挑到错的那个。现在手柄一律只由 `vpad_init` 分配。
+
+### fix(input-agent): 句柄名不复位 + 脚本留痕
+
+- 全部句柄释放后 `next_index` 归 1，`vpad_init` 重新拿回 `pad1`（与手机端
+  写死的 `_vpadHandle` 一致）
+- 安装脚本把执行输出转录到 `%TEMP%\mn-rt-vigembus-install.log`：提权子进程在
+  另一个控制台跑，调用方拿不到 stdout，此前失败原因彻底黑盒
+
+### chore: 驱动安装脚本收敛为唯一源
+
+`scripts/install-vigembus.ps1`（仓库根）是过期副本——它写死的 MSI 地址在任何
+release 里都不存在（必 404），且与随包分发的 `client/scripts/` 那份已经分叉。
+删除根目录副本，唯一脚本源为 `client/scripts/install-vigembus.ps1`。
+
+### feat(client): 本地记录补 `action` 字段
+
+`LocalStore.append` 是固定 9 字段 schema，调用方传的 `action` / `seq` 被丢弃，
+`records.jsonl` 看不出是哪条 vpad 指令、也看不出 seq。schema 增加 `action`，
+seq 仍不落盘（快照类记录靠 text 关联）。
+
 ## [0.7.3] — 2026-10-19
 
 ### feat(client): 新增 `install-driver` 子命令——一键装 ViGEmBus
