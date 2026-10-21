@@ -5,6 +5,21 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.7.11] — 2026-10-21
+
+### chore(client): 移除平台分包依赖——安装时不再触发 deprecated 警告
+
+`nx-rt` 此前把 `@ondevplann/input-agent-*@0.2.0` 挂在 `optionalDependencies`
+上：这些包在 npm 上已被标记 deprecated，用户 `npm i -g nx-rt` 时会看到
+「npm warn deprecated」——而实际上**主包 `binaries/` 内置的引擎才是运行时
+唯一使用的二进制**（`findBinary` 解析顺序：包内副本 → 分包 → 缓存），分包
+从未被真正用到，还停留在 0.2.0 旧引擎。
+
+- `optionalDependencies` 整组移除：安装不再拉分包，警告消失。
+- 分包作为独立渠道保留并刷新至 0.7.10（与 Release 同源、四平台齐备），
+  0.2.0 的 deprecated 标记已清除；直装分包的用户拿到的也是新引擎。
+- `findBinary` 的分包回退分支保留（无害）：分包缺失时静默跳过。
+
 ## [0.7.10] — 2026-10-21
 
 ### feat(vpad): 驱动安装进度可视化 + 隐藏提权控制台窗口

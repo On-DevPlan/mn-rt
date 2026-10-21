@@ -547,7 +547,7 @@ https://github.com/ZHLX2005/mn-rt/releases/download/v0.1.0/linux-x64/input-agent
 
 **版本纪律**：npm 包版本、git tag、GitHub Release 三者必须同步（运行时二进制下载回退按 `v<npm版本>` 拼地址）。改了 Rust 代码 → 先确认 Release 资产已就位，再发 npm。
 
-**平台分包**（`@ondevplann/input-agent-{win32-x64,linux-x64,darwin-x64,darwin-arm64}`）不在自动发布范围：Rust 产物变更后从 Release 取对应二进制手动 `npm publish`（版本号与 Release tag 一致），darwin 分包待补。
+**平台分包**（`@ondevplann/input-agent-{win32-x64,linux-x64,darwin-x64,darwin-arm64}`）自 0.7.11 起不再是 `nx-rt` 的依赖：主包 `binaries/` 内置全平台引擎，运行时不会读取分包。分包仅作为独立安装渠道保留（0.7.10 起与 Release 同源、四平台齐备）；Rust 产物变更后如需同步它们，从 Release 取对应二进制手动 `npm publish`（版本号与 Release tag 一致）。
 
 可用 `REMOTETYPE_BINARY_BASE` 覆盖下载源，`REMOTETYPE_VERSION` 覆盖版本号。
 
