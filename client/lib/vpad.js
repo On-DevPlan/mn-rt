@@ -233,7 +233,8 @@ class VPadClient {
   }
 
   /**
-   * 设置方向键方向。`up`/`down`/`left`/`right`/`none`。
+   * 设置方向键方向。`up`/`down`/`left`/`right`/`up_left`/`up_right`/`down_left`/
+   * `down_right`/`none`。
    */
   async dpad(handleOrLabel, dir) {
     const h = await this._ensureHandle(handleOrLabel);

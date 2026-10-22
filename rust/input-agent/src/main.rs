@@ -216,7 +216,7 @@ pub(crate) struct Command {
     #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_trigger: Option<String>,
-    /// vpad_dpad：方向（up/down/left/right/none）。
+    /// vpad_dpad：方向（up/down/left/right/up_left/up_right/down_left/down_right/none）。
     #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_dir: Option<String>,

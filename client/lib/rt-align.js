@@ -62,8 +62,8 @@ const VPAD_BUTTONS = new Set(['a', 'b', 'x', 'y', 'lb', 'rb', 'back', 'start', '
 const VPAD_AXES = new Set(['lx', 'ly', 'rx', 'ry']);
 /** vpad_trigger 扳机名白名单 */
 const VPAD_TRIGGERS = new Set(['lt', 'rt']);
-/** vpad_dpad 方向白名单（none = 回中） */
-const VPAD_DIRS = new Set(['up', 'down', 'left', 'right', 'none']);
+/** vpad_dpad 方向白名单（none = 回中；斜向为两个方向位并置，需 v0.7.12+ agent） */
+const VPAD_DIRS = new Set(['up', 'down', 'left', 'right', 'up_left', 'up_right', 'down_left', 'down_right', 'none']);
 
 /**
  * 校验并归一化手机端 mouse 载荷（v0.6.0+ 触摸板协议）。
@@ -107,7 +107,7 @@ function normalizeMouseOp(m) {
  *   - {action:'vpad_button', vpad_handle, vpad_button, vpad_value_bool}
  *   - {action:'vpad_axis',   vpad_handle, vpad_axis, vpad_value:-1..1}
  *   - {action:'vpad_trigger',vpad_handle, vpad_trigger, vpad_value:0..1}
- *   - {action:'vpad_dpad',   vpad_handle, vpad_dir:up|down|left|right|none}
+ *   - {action:'vpad_dpad',   vpad_handle, vpad_dir:up|down|left|right|up_left|up_right|down_left|down_right|none}
  * rust 端按 handle 维护「上一次」累积状态，客户端只发变化字段即可。
  */
 function normalizeVpadOp(cmd) {

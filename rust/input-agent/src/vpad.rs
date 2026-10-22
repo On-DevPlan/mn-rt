@@ -741,6 +741,11 @@ enum VPadDpad {
     Down,
     Left,
     Right,
+    // 斜向 = 两个方向位同时置起（XInput 位掩码天然支持，DPAD_MASK 仍是 0x000F）。
+    UpLeft,
+    UpRight,
+    DownLeft,
+    DownRight,
     None,
 }
 
@@ -752,6 +757,10 @@ impl VPadDpad {
             Self::Down => 0x0002,
             Self::Left => 0x0004,
             Self::Right => 0x0008,
+            Self::UpLeft => Self::Up.bits() | Self::Left.bits(),
+            Self::UpRight => Self::Up.bits() | Self::Right.bits(),
+            Self::DownLeft => Self::Down.bits() | Self::Left.bits(),
+            Self::DownRight => Self::Down.bits() | Self::Right.bits(),
             Self::None => 0x0000,
         }
     }
@@ -761,6 +770,10 @@ impl VPadDpad {
             Self::Down => "down",
             Self::Left => "left",
             Self::Right => "right",
+            Self::UpLeft => "up_left",
+            Self::UpRight => "up_right",
+            Self::DownLeft => "down_left",
+            Self::DownRight => "down_right",
             Self::None => "none",
         }
     }
@@ -773,10 +786,14 @@ fn parse_dpad(s: &str) -> Result<VPadDpad, String> {
         "down" => VPadDpad::Down,
         "left" => VPadDpad::Left,
         "right" => VPadDpad::Right,
+        "up_left" => VPadDpad::UpLeft,
+        "up_right" => VPadDpad::UpRight,
+        "down_left" => VPadDpad::DownLeft,
+        "down_right" => VPadDpad::DownRight,
         "none" => VPadDpad::None,
         other => {
             return Err(format!(
-                "unknown dpad dir: {other:?} (valid: up,down,left,right,none)"
+                "unknown dpad dir: {other:?} (valid: up,down,left,right,up_left,up_right,down_left,down_right,none)"
             ))
         }
     })
@@ -997,6 +1014,24 @@ mod tests {
         for bad in ["center", "", "u"] {
             assert!(parse_dpad(bad).is_err(), "{bad:?} should fail");
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn dpad_diagonals_parse_and_map_to_combined_bits() {
+        for s in ["up_left", "UP_RIGHT", "down_left", "down_right"] {
+            parse_dpad(s).expect(s);
+        }
+        // 斜向 = 两个方向位同时置起（XInput 位掩码）。
+        assert_eq!(VPadDpad::UpLeft.bits(), 0x0005);
+        assert_eq!(VPadDpad::UpRight.bits(), 0x0009);
+        assert_eq!(VPadDpad::DownLeft.bits(), 0x0006);
+        assert_eq!(VPadDpad::DownRight.bits(), 0x000A);
+        // 名字回读与手机端下发的值同名（白名单两侧一致）。
+        assert_eq!(VPadDpad::UpLeft.name(), "up_left");
+        assert_eq!(VPadDpad::DownRight.name(), "down_right");
+        // 连字符不是合法写法（锁下划线拼写）。
+        assert!(parse_dpad("up-left").is_err());
     }
 
     // vpad_* 字段是 Windows-only 协议表面（见 main.rs Command 的 cfg 注释），

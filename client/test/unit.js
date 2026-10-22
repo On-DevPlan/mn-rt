@@ -821,6 +821,14 @@ test('normalizeVpadOp：七类指令白名单归一化', () => {
     normalizeVpadOp({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'up' }),
     { action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'up' },
   );
+  // 斜向（八向模式）：下划线拼写，原样透传给 agent
+  for (const d of ['up_left', 'up_right', 'down_left', 'down_right']) {
+    assert.deepStrictEqual(
+      normalizeVpadOp({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: d }),
+      { action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: d },
+      `斜向 ${d} 应放行`,
+    );
+  }
 });
 
 test('normalizeVpadOp：非法载荷返回 null', () => {
@@ -861,6 +869,11 @@ test('normalizeVpadOp：非法载荷返回 null', () => {
     normalizeVpadOp({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'center' }),
     null,
     '回中只能用 none',
+  );
+  assert.strictEqual(
+    normalizeVpadOp({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'up-left' }),
+    null,
+    '斜向只认下划线拼写（up-left 不放行）',
   );
 });
 
