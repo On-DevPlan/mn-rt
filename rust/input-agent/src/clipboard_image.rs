@@ -1,4 +1,4 @@
-//! set_clipboard_image 的 Windows 实现（v0.7.0+）。
+//! set_clipboard_image 的 Windows 实现（v0.8.0+）。
 //!
 //! 手机拍照经 relay 送达后，Node 侧已把完整 JPEG 字节（base64）放进指令；
 //! 本模块只做三件事：

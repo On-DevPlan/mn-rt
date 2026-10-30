@@ -140,10 +140,13 @@ async function main() {
 
   spawnChild('client', 'node', [
     path.join(CLIENT_ROOT, 'bin', 'index.js'),
+    // 0.7.x 起 CLI 改为子命令制：连接必须显式 `serve`
+    'serve',
     '--url', `ws://127.0.0.1:${PORT}/ws`,
     '--client-id', CLIENT_ID,
     '--align', '--key', KEY,
     '--no-save',
+    '--no-update-check',
     '--record-file', path.join(tmp, 'client-records.jsonl'),
   ], CLIENT_ROOT);
   await sleep(1200); // 等注册与 agent 就绪

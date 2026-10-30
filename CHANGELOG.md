@@ -5,6 +5,36 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.8.0] — 2026-10-31
+
+### feat(rt): 图片通道三端贯通——手机拍照直进电脑剪贴板（RT1 v0.8.0 协议）
+
+文件模块第一个能力：手机拍一张照片，端到端加密分片上传，PC 端解码后写进
+系统剪贴板，Ctrl+V 即贴。支持 ≤10MB，逐块 ACK 驱动进度条，失败重试只补
+缺失块（同 id 续传）。48KB 分片的信封帧 ≈64KB，天然穿过 serve 默认
+100KB maxPayload——**服务端零改动**。
+
+- **input-agent** 新增 `set_clipboard_image` action（仅 Windows，其余平台
+  明确报错不静默）：base64 JPEG → zune-jpeg 解码成 BGRA → 手工拼 CF_DIB
+  （BITMAPINFOHEADER + 自底向上 32bpp，与 Ditto 的主粘贴路径同款，全消费方
+  都认）→ SetClipboardData；OpenClipboard 被占用短重试（写剪贴板幂等）；
+  防御上限 12MB 字节 / 60MP 像素。release 二进制 307KB（+107KB）。
+- **rt-align** 新增 `plain.img` 事件分支（seq 去重之前处理、不碰快照状态
+  机）+ 独立重组器 `lib/rt-image.js`：**元数据控制层与数据层分离**——begin
+  一次声明 n/size/mime、PC 端一次性预分配缓冲；chunk 纯数据按 offset 直填、
+  重复块幂等覆写；end 到齐交剪贴板、abort 释放。半成品保留 10 分钟、
+  LRU ≤4 张，等续传。
+- **ACK 语义精确化**：begin/chunk 受理即 ACK（= 分片落袋，续传对账依据）；
+  **end 的 ACK 延迟到剪贴板写入成功**——手机端看到最后一块被确认即整图
+  成功，失败则超时补发缺失块。
+- **图片泵**（bin/index.js）：与 MousePump/dispatchVpad 同理绕过串行注入
+  队列（10MB 图的 JPEG 解码不能卡打字）；同一时刻只处理一张，忙时丢弃
+  整图（手机端可续传重试）。
+- 手机端（fr）配套文件模块：实时拍照（image_picker 系统相机）→ 分片上传，
+  进度条 + 取消 + 重试。
+- 新增端到端冒烟 `client/test/e2e-image-smoke.js`：一条命令本地起 serve +
+  真 PC 客户端（写真系统剪贴板）+ 假手机端分片发图，全链路自检。
+
 ## [0.7.12] — 2026-10-27
 
 ### feat(vpad): 十字键八向放行——斜向 vpad_dir 不再被客户端白名单丢弃

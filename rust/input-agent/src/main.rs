@@ -31,7 +31,7 @@
 //!                               {"ok":true,"msg":"clipboard image complete","bytes":N}
 //!                               {"ok":false,"msg":"reason"}
 //!
-//! 【剪贴板图片（v0.7.0+，文件模块·实时拍照）】
+//! 【剪贴板图片（v0.8.0+，文件模块·实时拍照）】
 //! ─────────────────────────────────────
 //! * Node 侧把分片重组完成的完整 JPEG（base64）经一条 stdin 指令送进来，
 //!   Rust 侧解码成 BGRA 像素后拼 CF_DIB 写入系统剪贴板（见 clipboard_image.rs，
