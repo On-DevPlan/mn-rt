@@ -21,14 +21,23 @@
  * 明文格式（信封解密后）：
  *   快照：{ text: string, ts: number, phoneId: string, enterMode?: string }
  *   事件：{ hotkey: string[], ts, phoneId } | { mouse: object, ts, phoneId }
+ *         | { img: object, ts, phoneId }
  *   phoneId 用于 PC → 手机的 ACK 反向路由（经 server.js 转发，明文元数据，不敏感）。
- *   事件（hotkey / mouse）在 seq 去重之前处理：重复应重复生效，且不碰快照状态机。
+ *   事件（hotkey / mouse / img）在 seq 去重之前处理：重复应重复生效（img 的
+ *   chunk 本就幂等），且不碰快照状态机。
+ *
+ * 【img 事件（v0.7.0+ 文件模块·实时拍照）】
+ *   元数据控制层 + 数据层分离的图片传输（协议详见 rt-image.js）：
+ *   begin 声明元数据并预分配缓冲，chunk 纯数据直填，end 到齐交给剪贴板，
+ *   abort 取消。chunk 逐条 ACK；end 的 ACK 延迟到「剪贴板写入成功」——
+ *   手机端看到最后一块被确认即整图成功，失败则超时后续传（同 id 补缺口）。
  */
 
 const EventEmitter = require('events');
 const crypto = require('crypto');
 const { deriveFromKey, buildAad, seal, open } = require('./rt-crypto');
 const { planTransition } = require('./rt-diff');
+const { RtImageRx, normalizeImageOp } = require('./rt-image');
 
 const DIR_P2C = 'p2c';
 const DIR_C2P = 'c2p';
@@ -212,7 +221,17 @@ class RtAlignSession extends EventEmitter {
       envelopesOk: 0, envelopesBad: 0, syncsApplied: 0, acksSent: 0, plaintextRejected: 0,
       mouseEvents: 0, mouseDropped: 0,
       vpadEvents: 0,
+      imagesDone: 0, imagesIncomplete: 0,
     };
+    this.imageRx = new RtImageRx({ logger: opts.logger });
+    this.imageRx.on('image-complete', ({ id, bytes }) => {
+      this.logger?.info('图片分片全部到齐，待写入剪贴板', { id, bytes: bytes.length });
+    });
+    this.imageRx.on('image-gc', ({ id, reason, got, total }) => {
+      if (reason !== 'lru-evict' || got > 0) {
+        this.logger?.info('不完整图片传输已释放', { id, reason, got, total });
+      }
+    });
 
     // 看门狗自驱动：commit 事件若因队列溢出等丢失，busy 会卡死（relay-client 时代由
     // 快照拉取定时器顺带驱动，独立成引擎后自备 30s 巡检）
@@ -336,6 +355,65 @@ class RtAlignSession extends EventEmitter {
       return 'envelope';
     }
 
+    // 图片传输（v0.8.0+ 文件模块）：与 hotkey 同属「事件」语义——seq 去重
+    // 之前处理、不碰快照状态机。ACK 策略（与 hotkey 的「已受理」不同，这里
+    // ACK 有精确语义，手机端靠它驱动进度条与续传）：
+    //   begin / chunk：受理即 ACK = 「这块缓冲我已落袋」，重试据此只补缺口；
+    //   chunk 校验失败不 ACK：客户端超时后补发该块；
+    //   end：到齐且剪贴板写入成功才 ACK（见 imageDelivered）——最后一块的
+    //        ACK = 整图完成；不齐则保留缓冲等续传，同样不 ACK。
+    if (plain.img !== null && typeof plain.img === 'object') {
+      const img = normalizeImageOp(plain.img);
+      if (img === null) {
+        this.stats.envelopesBad += 1;
+        this.logger?.warn('align 丢弃非法 img 载荷', { seq });
+        return 'duplicate';
+      }
+      this.phoneId = typeof plain.phoneId === 'string' ? plain.phoneId : '';
+      this.stats.envelopesOk += 1;
+      switch (img.op) {
+        case 'begin': {
+          const r = this.imageRx.begin(img);
+          if (r.ok) {
+            this.logger?.info('图片传输开始', {
+              id: img.id, n: img.n, size: img.size, resumed: r.resumed,
+            });
+            this._sendAck(seq);
+          } else {
+            this.logger?.warn('图片 begin 被拒', { id: img.id });
+          }
+          break;
+        }
+        case 'chunk': {
+          const r = this.imageRx.chunk(img);
+          if (r.ok) this._sendAck(seq);
+          break;
+        }
+        case 'end': {
+          const r = this.imageRx.end(img);
+          if (r.complete) {
+            this.stats.imagesDone += 1;
+            // 完整图片交给上层写剪贴板；成功后上层回调 imageDelivered(seq)
+            this.emit('op', { op: 'image', image: r.bytes, seq });
+          } else {
+            this.stats.imagesIncomplete += 1;
+            this.logger?.warn('图片传输不完整，保留缓冲等待续传', {
+              id: img.id, got: r.got, total: r.total,
+            });
+          }
+          break;
+        }
+        case 'abort': {
+          this.imageRx.abort(img);
+          this._sendAck(seq);
+          break;
+        }
+        default:
+          break;
+      }
+      return 'envelope';
+    }
+
     // 手机端重启会换 sid 且 seq 归零：新会话无条件接受
     if (sid !== this.lastSyncSid) {
       this.logger?.info('input session detected', { sid, prev: this.lastSyncSid });
@@ -434,6 +512,15 @@ class RtAlignSession extends EventEmitter {
     this.emit('plan-stalled', { seq, attempts: this.pendingFails });
   }
 
+  /**
+   * 上层报告「剪贴板写入成功」。补发该图 end 信封的 ACK——手机端收到
+   * 最后一块的确认即认为整图成功。失败时上层不调用本方法，手机端超时
+   * 后按同 id 续传（缓冲仍在，只补缺口）。
+   */
+  imageDelivered(seq) {
+    this._sendAck(seq);
+  }
+
   _sendAck(appliedSeq) {
     if (typeof this._sendAckTransport !== 'function') return;
     this.ackSeq += 1;
@@ -457,6 +544,8 @@ class RtAlignSession extends EventEmitter {
    * 超过 2 分钟未 commit 就强制复位，按 mirror → 最新 desired 重新 diff（自愈）。
    */
   busyWatchdog() {
+    // 看门狗每次巡检顺带检查图片半成品的保留期（不另起定时器）
+    this.imageRx.gc();
     if (!this.busy || !this.busySince) return;
     if (Date.now() - this.busySince < 120000) return;
     this.logger?.warn('busy watchdog fired, resetting pending ops', {

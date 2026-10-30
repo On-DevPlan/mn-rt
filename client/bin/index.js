@@ -762,6 +762,41 @@ async function cmdServe(cfg, flags = {}) {
     });
   };
 
+  // 图片泵（文件模块·实时拍照 v0.8.0+）：绕过串行队列——写剪贴板可能耗数百
+  // 毫秒（10MB 图的 JPEG 解码），不能卡住打字。同一时刻只处理一张；忙时丢弃
+  // 整图：手机端最后一块等不到 ACK 会按同 id 续传重试，不会丢数据。
+  let imageBusy = false;
+  const imagePump = {
+    async dispatch(op) {
+      if (imageBusy) {
+        logger.warn('上一张图片尚未写完剪贴板，本次丢弃（手机端可续传重试）', { seq: op.seq });
+        store.append({ status: 'image_dropped_busy', source: 'align' });
+        return;
+      }
+      imageBusy = true;
+      const startedAt = Date.now();
+      const bytes = op.image.length;
+      try {
+        const res = await agent.setClipboardImage(op.image.toString('base64'));
+        if (res?.ok) {
+          // 最后一块的 ACK = 整图已进剪贴板；不发 ACK 手机端就会续传重试
+          align?.imageDelivered(op.seq);
+          const durationMs = Date.now() - startedAt;
+          logger.info('图片已写入系统剪贴板（Ctrl+V 即可粘贴）', { bytes, durationMs });
+          store.append({ status: 'clipboard_image', text: `image ${bytes}B`, durationMs, source: 'align' });
+        } else {
+          logger.error('写剪贴板失败（手机端可续传重试）', { msg: res?.msg, bytes });
+          store.append({ status: 'clipboard_image_failed', errorMsg: res?.msg ?? 'unknown', source: 'align' });
+        }
+      } catch (e) {
+        logger.error('写剪贴板异常（手机端可续传重试）', { error: e.message, bytes });
+        store.append({ status: 'clipboard_image_failed', errorMsg: e.message, source: 'align' });
+      } finally {
+        imageBusy = false;
+      }
+    },
+  };
+
   // 对齐模式会话（可选）；serve 在其后创建，sendAck 闭包引用
   let align = null;
   let serve;
@@ -975,6 +1010,11 @@ async function cmdServe(cfg, flags = {}) {
       // 虚拟手柄指令（v0.7.0+）：专用串行链，保序不丢，不进文本共享队列。
       if (op.op === 'vpad') {
         dispatchVpad(op.cmd, op.seq);
+        return;
+      }
+      // 图片完成（v0.8.0+ 文件模块）：同样绕过串行队列，见 imagePump 注释
+      if (op.op === 'image') {
+        imagePump.dispatch(op);
         return;
       }
       const accepted = queue.push(op, { source: 'align', enqueuedAt: Date.now() });

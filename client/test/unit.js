@@ -2473,6 +2473,176 @@ test('saveConnectionConfig(cfg, {accountKey})：借用别人账号只写它的�
   });
 });
 
+console.log('\n== rt-image：图片分片重组（v0.7.0+ 文件模块） ==');
+
+test('begin→chunk→end 完整流程：预分配、乱序直填、到齐出图', () => {
+  const { RtImageRx, RT_IMAGE_CHUNK_SIZE } = require('../lib/rt-image');
+  const rx = new RtImageRx();
+  const id = RtImageRx.newId();
+  const size = RT_IMAGE_CHUNK_SIZE * 2 + 5;
+  const part1 = Buffer.alloc(RT_IMAGE_CHUNK_SIZE, 0xaa);
+  const part2 = Buffer.alloc(RT_IMAGE_CHUNK_SIZE, 0xbb);
+  const part3 = Buffer.alloc(5, 0xcc);
+
+  const r1 = rx.begin({ op: 'begin', id, n: 3, size, mime: 'image/jpeg' });
+  assert.strictEqual(r1.ok, true);
+  assert.strictEqual(r1.resumed, false);
+
+  const norm = (i, buf) => ({ op: 'chunk', id, i, d: buf.toString('base64') });
+  // 乱序到达（3 → 1）也要能填对位置
+  assert.deepStrictEqual(rx.chunk(norm(2, part3)), { ok: true, got: 1, total: 3 });
+  assert.deepStrictEqual(rx.chunk(norm(0, part1)), { ok: true, got: 2, total: 3 });
+
+  const rEnd = rx.end({ op: 'end', id });
+  assert.strictEqual(rEnd.complete, false, '缺第 1 块时 end 不完整');
+  assert.deepStrictEqual(rEnd.missing, [1]);
+
+  assert.deepStrictEqual(rx.chunk(norm(1, part2)), { ok: true, got: 3, total: 3 });
+  let completed = null;
+  rx.on('image-complete', (e) => { completed = e; });
+  const rEnd2 = rx.end({ op: 'end', id });
+  assert.strictEqual(rEnd2.complete, true);
+  assert.strictEqual(completed.id, id);
+  assert.strictEqual(completed.bytes.length, size);
+  assert.strictEqual(completed.bytes[0], 0xaa);
+  assert.strictEqual(completed.bytes[RT_IMAGE_CHUNK_SIZE], 0xbb);
+  assert.strictEqual(completed.bytes[size - 1], 0xcc);
+});
+
+test('续传：同 id 同元数据保留缓冲，重复 chunk 幂等', () => {
+  const { RtImageRx, RT_IMAGE_CHUNK_SIZE } = require('../lib/rt-image');
+  const rx = new RtImageRx();
+  const id = RtImageRx.newId();
+  const size = RT_IMAGE_CHUNK_SIZE + 3;
+  const meta = { op: 'begin', id, n: 2, size, mime: 'image/jpeg' };
+
+  rx.begin(meta);
+  const d0 = Buffer.alloc(RT_IMAGE_CHUNK_SIZE, 0x11).toString('base64');
+  rx.chunk({ op: 'chunk', id, i: 0, d: d0 });
+  // 模拟 ACK 丢失后补发同一块：不增加 got
+  rx.chunk({ op: 'chunk', id, i: 0, d: d0 });
+
+  const r = rx.begin(meta); // 重试 = 重发 begin(同 id)
+  assert.strictEqual(r.resumed, true);
+  assert.strictEqual(r.got, 1, '重复块不计入 got');
+
+  const d1 = Buffer.alloc(3, 0x22).toString('base64');
+  rx.chunk({ op: 'chunk', id, i: 1, d: d1 });
+  const rEnd = rx.end({ op: 'end', id });
+  assert.strictEqual(rEnd.complete, true);
+  assert.strictEqual(rEnd.bytes[RT_IMAGE_CHUNK_SIZE], 0x22);
+});
+
+test('normalizeImageOp 白名单：非法载荷全部拒绝', () => {
+  const { normalizeImageOp, RT_IMAGE_MAX_CHUNKS, RT_IMAGE_CHUNK_SIZE } = require('../lib/rt-image');
+  assert.strictEqual(normalizeImageOp(null), null);
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'xyz', n: 2, size: 10 }), null, 'id 非 8hex');
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 0, size: 10 }), null, 'n=0');
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: RT_IMAGE_MAX_CHUNKS + 1, size: 10 }), null, 'n 超上限');
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: 12 * 1024 * 1024 + 1 }), null, 'size 超上限');
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: RT_IMAGE_CHUNK_SIZE }), null, 'n/size 矛盾：最后一块 ≤0');
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: 10, mime: 'image/png' }), null, 'mime 仅 jpeg');
+  assert.strictEqual(normalizeImageOp({ op: 'chunk', id: 'aabbccdd', i: -1, d: 'aGk=' }), null);
+  assert.strictEqual(normalizeImageOp({ op: 'chunk', id: 'aabbccdd', i: 0, d: '' }), null);
+  assert.strictEqual(normalizeImageOp({ op: 'wat', id: 'aabbccdd' }), null);
+  const ok = normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: RT_IMAGE_CHUNK_SIZE + 1 });
+  assert.notStrictEqual(ok, null);
+  assert.strictEqual(ok.n, 2);
+});
+
+test('LRU 与过期：半成品受数量与保留期双向约束', () => {
+  const { RtImageRx, RT_IMAGE_MAX_PARTIALS } = require('../lib/rt-image');
+  const rx = new RtImageRx();
+  const dropped = [];
+  rx.on('image-gc', (e) => dropped.push(e));
+
+  // 塞满上限
+  for (let k = 0; k < RT_IMAGE_MAX_PARTIALS; k += 1) {
+    rx.begin({ op: 'begin', id: `0000000${k}`, n: 1, size: 4, mime: 'image/jpeg' });
+  }
+  assert.strictEqual(rx.transfers.size, RT_IMAGE_MAX_PARTIALS);
+  // 再来一个 → 最旧的 0 号被 LRU 淘汰
+  rx.begin({ op: 'begin', id: '00000009', n: 1, size: 4, mime: 'image/jpeg' });
+  assert.strictEqual(rx.transfers.size, RT_IMAGE_MAX_PARTIALS);
+  assert.ok(dropped.some((e) => e.id === '00000000' && e.reason === 'lru-evict'));
+
+  // 过期 GC：把 lastTouchAt 拨回 11 分钟前
+  for (const t of rx.transfers.values()) t.lastTouchAt = Date.now() - 11 * 60 * 1000;
+  rx.gc();
+  assert.strictEqual(rx.transfers.size, 0);
+  assert.ok(dropped.some((e) => e.reason === 'expired'));
+
+  // abort 立即释放
+  rx.begin({ op: 'begin', id: 'aaaaaaaa', n: 1, size: 4, mime: 'image/jpeg' });
+  rx.abort({ op: 'abort', id: 'aaaaaaaa' });
+  assert.strictEqual(rx.transfers.size, 0);
+});
+
+test('未知 id 的 chunk 被拒且不崩溃', () => {
+  const { RtImageRx } = require('../lib/rt-image');
+  const rx = new RtImageRx();
+  assert.strictEqual(rx.chunk({ op: 'chunk', id: 'deadbeef', i: 0, d: 'aGk=' }).ok, false);
+  assert.strictEqual(rx.end({ op: 'end', id: 'deadbeef' }).ok, false);
+});
+
+console.log('\n== rt-align：img 事件分支（ACK 语义） ==');
+
+test('img 事件走事件通道：不碰快照状态机，chunk 受理即 ACK，end 延迟 ACK', () => {
+  const { RtImageRx, RT_IMAGE_CHUNK_SIZE } = require('../lib/rt-image');
+  const { RtAlignSession, looksLikeEnvelope } = require('../lib/rt-align');
+  const { deriveFromKey, buildAad, seal } = require('../lib/rt-crypto');
+
+  const key = 'TESTKEY123';
+  const derived = deriveFromKey(key);
+  const acks = [];
+  const ops = [];
+  const session = new RtAlignSession({
+    key,
+    logger: null,
+    sendAck: (envelope) => acks.push(envelope),
+  });
+  session.on('op', (op) => ops.push(op));
+
+  const sendImg = (img, seq) => {
+    const envelope = seal(
+      derived.keyPhoneToPc,
+      buildAad(derived.room, 'p2c', seq),
+      { img, ts: Date.now(), phoneId: 'phone-1' },
+      { sid: 'sid1', seq },
+    );
+    const text = JSON.stringify(envelope);
+    assert.ok(looksLikeEnvelope(text));
+    return session.handleIncoming(text);
+  };
+
+  const id = RtImageRx.newId();
+  const size = RT_IMAGE_CHUNK_SIZE + 2;
+  // begin：受理即 ACK
+  assert.strictEqual(sendImg({ op: 'begin', id, n: 2, size, mime: 'image/jpeg' }, 101), 'envelope');
+  assert.strictEqual(acks.length, 1);
+  // 快照状态机未被触碰
+  assert.strictEqual(session.desiredText, null);
+  assert.strictEqual(session.busy, false);
+  // chunk#0 + chunk#1：各 ACK 一次
+  const d0 = Buffer.alloc(RT_IMAGE_CHUNK_SIZE, 7).toString('base64');
+  const d1 = Buffer.alloc(2, 8).toString('base64');
+  assert.strictEqual(sendImg({ op: 'chunk', id, i: 0, d: d0 }, 102), 'envelope');
+  assert.strictEqual(sendImg({ op: 'chunk', id, i: 1, d: d1 }, 103), 'envelope');
+  assert.strictEqual(session.imageRx.transfers.get(id).got, 2);
+  // end 在全部到齐时：发 op 且不 ACK（等剪贴板成功后的 imageDelivered）
+  sendImg({ op: 'end', id }, 105);
+  assert.strictEqual(acks.length, 3, 'begin/chunk ACK 各一次，end 不 ACK');
+  assert.strictEqual(ops.length, 1);
+  assert.strictEqual(ops[0].op, 'image');
+  assert.strictEqual(ops[0].image.length, size);
+  assert.strictEqual(ops[0].seq, 105);
+  // 剪贴板写入成功 → imageDelivered 补 ACK
+  session.imageDelivered(105);
+  assert.strictEqual(acks.length, 4);
+  // 非法 img 载荷被丢弃且报 duplicate
+  assert.strictEqual(sendImg({ op: 'begin', id: 'bad', n: 1, size: 4 }, 106), 'duplicate');
+});
+
 run().then(() => {
   console.log('\n========================================');
   console.log(`  通过 ${pass}   失败 ${fail}`);

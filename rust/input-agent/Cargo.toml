@@ -30,11 +30,18 @@ linux-x11 = ["enigo/x11rb"]
 # ── 平台特定依赖：焦点识别（对齐模式的 expect_focus 校验）──
 # Windows 用 windows-sys（enigo 0.6.1 已在依赖树里拉了 0.61.2）
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory"] }
 # Windows 端虚拟 Xbox 360 手柄；非 Windows 平台不引用。
 # 0.1.x 是 CasualX 上 crates.io 唯一稳定版（X360 + 可选 unstable_ds4）。
-# 不开 DS4 feature：v0.7.0 scope 只有 X360。
+# 不开 DS4 feature：vpad scope 只有 X360。
 vigem-client = { version = "0.1", default-features = false }
+
+# ── 剪贴板图片（set_clipboard_image，v0.8.0+）──
+# 仅 Windows 声明：Linux/macOS 的剪贴板图片是未实现路径，不为其付出二进制体积。
+# base64 解码信封里的图片字节；zune-jpeg 解码成 BGRA 像素后手工拼 CF_DIB
+# （与 Ditto 的主路径同款：BITMAPINFOHEADER + 自底向上像素行）。
+base64 = "0.22"
+zune-jpeg = "0.4"
 
 # Linux 独立新建 X 连接做 GetInputFocus（与 enigo 的 x11rb 连接互不干扰）
 [target.'cfg(target_os = "linux")'.dependencies]

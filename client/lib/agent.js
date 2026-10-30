@@ -275,6 +275,18 @@ class AgentManager {
     return this._send(payload, timeoutMs);
   }
 
+  /**
+   * 写入一张图片到系统剪贴板（v0.7.0+ 文件模块·实时拍照）。
+   * 写剪贴板是幂等动作，失败可整条重试；大图解码留足超时余量。
+   * @param {string} data      base64 编码的完整 JPEG（≤12MB 原始字节）
+   * @param {string} [format]  当前仅 'jpeg'
+   * @param {number} [timeoutMs]
+   * @returns {Promise<{ok:boolean,msg?:string,bytes?:number}>}
+   */
+  setClipboardImage(data, format = 'jpeg', timeoutMs = 20000) {
+    return this.send({ action: 'set_clipboard_image', data, format }, timeoutMs);
+  }
+
   _send(payload, timeoutMs) {
     return new Promise((resolve, reject) => {
       if (!this.child || !this.child.stdin || this.child.stdin.destroyed) {

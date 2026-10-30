@@ -20,6 +20,7 @@
 //!       （Node -> Rust，stdin）:  {"action":"mouse_move","dx":12,"dy":-5}
 //!       （Node -> Rust，stdin）:  {"action":"mouse_button","button":"left","kind":"click"}
 //!       （Node -> Rust，stdin）:  {"action":"mouse_scroll","dx":0,"dy":3}
+//!       （Node -> Rust，stdin）:  {"action":"set_clipboard_image","data":"<base64 JPEG>","format":"jpeg"}
 //!       （Node -> Rust，stdin）:  {"action":"ping"}
 //! 协议（Rust -> Node，stdout）: {"ok":true,"msg":"input complete"}
 //!                               {"ok":true,"msg":"backspace complete","count":N}
@@ -27,7 +28,16 @@
 //!                               {"ok":true,"msg":"mouse_move complete","dx":12,"dy":-5}
 //!                               {"ok":true,"msg":"mouse_button complete","button":"left","kind":"click"}
 //!                               {"ok":true,"msg":"mouse_scroll complete","dx":0,"dy":3}
+//!                               {"ok":true,"msg":"clipboard image complete","bytes":N}
 //!                               {"ok":false,"msg":"reason"}
+//!
+//! 【剪贴板图片（v0.7.0+，文件模块·实时拍照）】
+//! ─────────────────────────────────────
+//! * Node 侧把分片重组完成的完整 JPEG（base64）经一条 stdin 指令送进来，
+//!   Rust 侧解码成 BGRA 像素后拼 CF_DIB 写入系统剪贴板（见 clipboard_image.rs，
+//!   与 Ditto 的主粘贴路径同款）。图片写入是幂等动作，失败可整条重试。
+//! * 仅 Windows 实现；其他平台回 ok:false 的明确错误，不静默成功。
+//! * 大小防御：解码字节 ≤ 12MB、像素 ≤ 60MP，超限报错不写剪贴板。
 //!
 //! 【鼠标指令（v0.6.0+，触摸板模式）】
 //! ─────────────────────────────────────
@@ -95,6 +105,8 @@ use serde_json::json;
 
 mod focus;
 mod vpad;
+#[cfg(windows)]
+mod clipboard_image;
 
 /// 单次注入的最大字符数。超过则分片，片间让出时间给目标程序的消息循环。
 /// 取值偏小是刻意的：部分 IDE / 终端在一口气注入大量字符时会丢字。
@@ -229,6 +241,12 @@ pub(crate) struct Command {
     #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_value_bool: Option<bool>,
+    /// set_clipboard_image：完整图片字节（base64 编码的 JPEG，v0.8.0+）。
+    #[serde(default)]
+    pub(crate) data: Option<String>,
+    /// set_clipboard_image：图片格式（当前仅 jpeg / jpg）。
+    #[serde(default)]
+    pub(crate) format: Option<String>,
 }
 
 /// 注入前的焦点校验。
@@ -625,6 +643,44 @@ fn mouse_scroll(enigo: &mut Enigo, dx: i32, dy: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// 处理 set_clipboard_image：base64 JPEG → CF_DIB 写入系统剪贴板。
+///
+/// 参数全部先校验、后解码，无效指令不触碰剪贴板。写剪贴板是幂等动作
+/// （与按键注入的「宁少勿多」相反），失败可整条重试。
+#[cfg(windows)]
+fn handle_clipboard_image(cmd: &Command) {
+    let Some(data) = cmd.data.as_deref().filter(|s| !s.is_empty()) else {
+        let msg = "set_clipboard_image requires data (base64 jpeg)";
+        log_err(msg);
+        emit(json!({ "ok": false, "msg": msg }));
+        return;
+    };
+    let format = cmd.format.as_deref().unwrap_or("jpeg").trim().to_ascii_lowercase();
+    if format != "jpeg" && format != "jpg" {
+        let msg = format!("unsupported image format: {format:?} (expected jpeg)");
+        log_err(&msg);
+        emit(json!({ "ok": false, "msg": msg }));
+        return;
+    }
+
+    match clipboard_image::set_image_jpeg(data) {
+        Ok(n) => emit(json!({ "ok": true, "msg": "clipboard image complete", "bytes": n })),
+        Err(reason) => {
+            log_err(&reason);
+            emit(json!({ "ok": false, "msg": reason }));
+        }
+    }
+}
+
+/// 非 Windows 平台的占位实现：明确报错，绝不静默成功。
+#[cfg(not(windows))]
+fn handle_clipboard_image(cmd: &Command) {
+    let _ = cmd;
+    let msg = "set_clipboard_image is only implemented on Windows";
+    log_err(msg);
+    emit(json!({ "ok": false, "msg": msg }));
+}
+
 /// 处理单条指令。所有错误都转成结果 JSON，保证主循环不因单条指令退出。
 fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VPadState>) {
     let trimmed = line.trim();
@@ -899,6 +955,7 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VP
                 }
             }
         }
+        "set_clipboard_image" => handle_clipboard_image(&cmd),
         "ping" => {
             // 心跳指令：仅用于 Node 侧判断子进程是否卡死。
             // 注意：这里不构造 Enigo，避免在无图形环境下心跳也失败。
@@ -1179,5 +1236,26 @@ mod tests {
             serde_json::from_str(r#"{"action":"mouse_scroll","dy":3}"#).expect("parse ok");
         assert_eq!(scroll.dx, None);
         assert_eq!(scroll.dy, Some(3));
+    }
+
+    // ── 剪贴板图片 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn command_parses_clipboard_image_action() {
+        let cmd: Command = serde_json::from_str(
+            r#"{"action":"set_clipboard_image","data":"aGVsbG8=","format":"jpeg"}"#,
+        )
+        .expect("parse ok");
+        assert_eq!(cmd.data.as_deref(), Some("aGVsbG8="));
+        assert_eq!(cmd.format.as_deref(), Some("jpeg"));
+    }
+
+    #[test]
+    fn command_clipboard_image_fields_optional() {
+        // format 缺省 = jpeg；data 缺失由 handler 报错
+        let cmd: Command =
+            serde_json::from_str(r#"{"action":"set_clipboard_image","data":"aGVsbG8="}"#)
+                .expect("parse ok");
+        assert_eq!(cmd.format, None);
     }
 }
