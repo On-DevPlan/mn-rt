@@ -5,6 +5,25 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.9.2] — 2026-10-31
+
+### fix(image): 图库截图 PNG 解码失败（Illegal start bytes:8950）
+
+手机图库截图是 PNG（≤2560px 时 image_picker 原样返回原始字节、不重编码），
+手机端按 image/jpeg 声明发送，引擎 zune-jpeg 解码直接失败且无 ACK、
+手机无限续传重试。
+
+- **引擎**（win32/linux 捆绑二进制同步刷新，CI MSVC 产物 + SHA256 校验）：
+  set_clipboard_image 按字节魔数嗅探真实格式（FF D8→JPEG /
+  89 50 4E 47→PNG），PNG 经 png crate 解码（调色板/灰度/16bit 归一，
+  alpha 保留——透明截图粘贴仍透明）；协议 format 字段降级为提示，
+  声明与实际不符时以字节为准。
+- **客户端**：img 通道 mime 白名单 +image/png（规范声明的 PNG 也路由到
+  剪贴板）；按 mime 传 format 提示。
+- 误标（PNG 字节 + jpeg 声明）与规范声明两种形态 e2e 冒烟均过。
+- 升级顺序：先升 PC 端到 0.9.2，手机端（fr）再上「按魔数声明真实 mime」
+  的包——旧 PC 白名单会静默丢弃 image/png（无 ACK 重试循环）。
+
 ## [0.9.1] — 2026-10-31
 
 ### feat(client): `--debug` 启动参数——排障观察事件与日志流向
