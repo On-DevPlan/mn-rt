@@ -762,14 +762,32 @@ async function cmdServe(cfg, flags = {}) {
     });
   };
 
-  // 图片泵（文件模块·实时拍照 v0.8.0+）：绕过串行队列——写剪贴板可能耗数百
-  // 毫秒（10MB 图的 JPEG 解码），不能卡住打字。同一时刻只处理一张；忙时丢弃
-  // 整图：手机端最后一块等不到 ACK 会按同 id 续传重试，不会丢数据。
+  // 图片/文件泵（文件模块 v0.8.0 拍照 / v0.9.0 上传文件）：绕过串行队列——
+  // 写剪贴板可能耗数百毫秒（10MB 图的 JPEG 解码），不能卡住打字。同一时刻
+  // 只处理一个；忙时丢弃整个载荷：手机端最后一块等不到 ACK 会按同 id 续传
+  // 重试，不会丢数据。mime 路由：image/jpeg → 剪贴板图片（CF_DIB）；
+  // application/octet-stream → 先落盘接收目录、再以 CF_HDROP 复制（剪贴板
+  // 里的「文件」是磁盘引用，不是字节——必须先有实体文件）。
   let imageBusy = false;
+  // 收到的文件落盘：--receive-dir（默认 ~/Downloads/RemoteType），文件名用
+  // 手机端 begin.name（rt-image 层已清洗）；重名不覆盖，追加毫秒时间戳。
+  const saveReceivedFile = async (buf, name) => {
+    const dir = cfg.receiveDir;
+    await fs.promises.mkdir(dir, { recursive: true });
+    const base = name || `received-${Date.now()}.bin`;
+    const ext = path.extname(base);
+    const stem = path.basename(base, ext);
+    let target = path.join(dir, base);
+    if (fs.existsSync(target)) {
+      target = path.join(dir, `${stem}-${Date.now()}${ext}`);
+    }
+    await fs.promises.writeFile(target, buf);
+    return target;
+  };
   const imagePump = {
     async dispatch(op) {
       if (imageBusy) {
-        logger.warn('上一张图片尚未写完剪贴板，本次丢弃（手机端可续传重试）', { seq: op.seq });
+        logger.warn('上一个载荷尚未处理完，本次丢弃（手机端可续传重试）', { seq: op.seq });
         store.append({ status: 'image_dropped_busy', source: 'align' });
         return;
       }
@@ -777,20 +795,34 @@ async function cmdServe(cfg, flags = {}) {
       const startedAt = Date.now();
       const bytes = op.image.length;
       try {
-        const res = await agent.setClipboardImage(op.image.toString('base64'));
+        let res;
+        let okText;
+        let storeStatus = 'clipboard_image';
+        let storeText = `payload ${bytes}B`;
+        if (op.mime === 'application/octet-stream') {
+          const saved = await saveReceivedFile(op.image, op.name);
+          res = await agent.setClipboardFiles([saved]);
+          okText = '文件已复制到电脑剪贴板，Ctrl+V 即可粘贴';
+          storeStatus = 'clipboard_file';
+          storeText = saved;
+        } else {
+          res = await agent.setClipboardImage(op.image.toString('base64'));
+          okText = '图片已写入系统剪贴板（Ctrl+V 即可粘贴）';
+        }
         if (res?.ok) {
-          // 最后一块的 ACK = 整图已进剪贴板；不发 ACK 手机端就会续传重试
+          // 最后一块的 ACK = 整图已进剪贴板 / 文件已落盘并复制；不发 ACK
+          // 手机端就会续传重试
           align?.imageDelivered(op.seq);
           const durationMs = Date.now() - startedAt;
-          logger.info('图片已写入系统剪贴板（Ctrl+V 即可粘贴）', { bytes, durationMs });
-          store.append({ status: 'clipboard_image', text: `image ${bytes}B`, durationMs, source: 'align' });
+          logger.info(okText, { bytes, durationMs });
+          store.append({ status: storeStatus, text: storeText, durationMs, source: 'align' });
         } else {
-          logger.error('写剪贴板失败（手机端可续传重试）', { msg: res?.msg, bytes });
-          store.append({ status: 'clipboard_image_failed', errorMsg: res?.msg ?? 'unknown', source: 'align' });
+          logger.error('写剪贴板失败（手机端可续传重试）', { msg: res?.msg, bytes, mime: op.mime });
+          store.append({ status: `${storeStatus}_failed`, errorMsg: res?.msg ?? 'unknown', source: 'align' });
         }
       } catch (e) {
-        logger.error('写剪贴板异常（手机端可续传重试）', { error: e.message, bytes });
-        store.append({ status: 'clipboard_image_failed', errorMsg: e.message, source: 'align' });
+        logger.error('写剪贴板异常（手机端可续传重试）', { error: e.message, bytes, mime: op.mime });
+        store.append({ status: 'clipboard_payload_failed', errorMsg: e.message, source: 'align' });
       } finally {
         imageBusy = false;
       }

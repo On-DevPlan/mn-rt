@@ -67,9 +67,9 @@ function spawnChild(tag, cmd, args, cwd) {
 /** 假手机端：注册 → 分片 → seal → 逐块发送 → 收 ACK 直到最后一块被确认。 */
 async function phoneSide() {
   const jpeg = fs.readFileSync(IMAGE);
-  const n = Math.ceil(jpeg.length / RT_IMAGE_CHUNK_SIZE);
   const derived = deriveFromKey(KEY);
   const sid = 'e2e1';
+  let seq = 1;
 
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { perMessageDeflate: false });
   await new Promise((resolve, reject) => {
@@ -104,25 +104,40 @@ async function phoneSide() {
   ws.send(JSON.stringify({ type: 'register', role: 'phone', phoneId: 'smoke-phone' }));
   await sleep(300); // 等 registered（本地环回足够）
 
-  const endSeq = n + 2;
-  sendEnvelope({ img: { op: 'begin', id: 'aaaa0001', n, size: jpeg.length, mime: 'image/jpeg' }, ts: Date.now(), phoneId: 'smoke-phone' }, 1);
-  for (let i = 0; i < n; i += 1) {
-    const d = jpeg.subarray(i * RT_IMAGE_CHUNK_SIZE, Math.min((i + 1) * RT_IMAGE_CHUNK_SIZE, jpeg.length));
-    sendEnvelope({ img: { op: 'chunk', id: 'aaaa0001', i, d: d.toString('base64') }, ts: Date.now(), phoneId: 'smoke-phone' }, i + 2);
-  }
-  sendEnvelope({ img: { op: 'end', id: 'aaaa0001' }, ts: Date.now(), phoneId: 'smoke-phone' }, endSeq);
-
-  const deadline = Date.now() + ACK_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (ackAppliedSeqs.includes(endSeq)) {
-      ws.close();
-      return { chunks: n, acks: ackAppliedSeqs.length };
+  /** 发一次完整传输（图片 / 文件共用 img 通道，mime 区分），等最后一块 ACK。 */
+  const runTransfer = async ({ id, mime, name, bytes }) => {
+    const n = Math.ceil(bytes.length / RT_IMAGE_CHUNK_SIZE);
+    sendEnvelope(
+      { img: { op: 'begin', id, n, size: bytes.length, mime, ...(name ? { name } : {}) }, ts: Date.now(), phoneId: 'smoke-phone' },
+      seq,
+    );
+    seq += 1;
+    for (let i = 0; i < n; i += 1) {
+      const d = bytes.subarray(i * RT_IMAGE_CHUNK_SIZE, Math.min((i + 1) * RT_IMAGE_CHUNK_SIZE, bytes.length));
+      sendEnvelope({ img: { op: 'chunk', id, i, d: d.toString('base64') }, ts: Date.now(), phoneId: 'smoke-phone' }, seq);
+      seq += 1;
     }
-    await sleep(100);
-  }
+    const endSeq = seq;
+    sendEnvelope({ img: { op: 'end', id }, ts: Date.now(), phoneId: 'smoke-phone' }, endSeq);
+    seq += 1;
+
+    const deadline = Date.now() + ACK_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (ackAppliedSeqs.includes(endSeq)) return { chunks: n, acks: ackAppliedSeqs.length };
+      await sleep(100);
+    }
+    throw new Error(`传输 ${id} 最后一块(${endSeq})在 ${ACK_TIMEOUT_MS}ms 内未获 ACK；收到 ${JSON.stringify(ackAppliedSeqs)}`);
+  };
+
+  // 1) 图片：JPEG → 剪贴板 CF_DIB
+  const img = await runTransfer({ id: 'aaaa0001', mime: 'image/jpeg', bytes: jpeg });
+  // 2) 文件（v0.9.0）：octet-stream + name → 接收目录落盘 + CF_HDROP 复制
+  const fileBytes = Buffer.from(`RemoteType e2e 文件通道冒烟 ${new Date().toISOString()}\n`.repeat(40));
+  const file = await runTransfer({ id: 'bbbb0002', mime: 'application/octet-stream', name: 'e2e-smoke.txt', bytes: fileBytes });
   ws.close();
-  throw new Error(`最后一块(${endSeq})在 ${ACK_TIMEOUT_MS}ms 内未获 ACK；收到 ${JSON.stringify(ackAppliedSeqs)}`);
+  return { img, file };
 }
+
 
 async function main() {
   if (!fs.existsSync(IMAGE)) {
@@ -147,12 +162,18 @@ async function main() {
     '--align', '--key', KEY,
     '--no-save',
     '--no-update-check',
+    // 文件接收目录指到临时区，别污染真实的 ~/Downloads
+    '--receive-dir', path.join(tmp, 'received'),
     '--record-file', path.join(tmp, 'client-records.jsonl'),
   ], CLIENT_ROOT);
   await sleep(1200); // 等注册与 agent 就绪
 
-  const { chunks, acks } = await phoneSide();
-  log('main', `PASS：${chunks} 块全部确认（含 begin/end 共 ${acks} 个 ACK），图片已进系统剪贴板`);
+  const { img, file } = await phoneSide();
+  const received = path.join(tmp, 'received', 'e2e-smoke.txt');
+  if (!fs.existsSync(received)) {
+    throw new Error(`文件通道落盘失败：${received} 不存在`);
+  }
+  log('main', `PASS：图片 ${img.chunks} 块 + 文件 ${file.chunks} 块全部确认；图片进过剪贴板、文件已落盘 ${received} 并以 CF_HDROP 复制`);
 }
 
 main()

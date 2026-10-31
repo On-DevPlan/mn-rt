@@ -560,6 +560,11 @@ function loadConfig(flags = {}) {
     requestTimeoutMs: num(flags.requestTimeoutMs ?? env.REMOTETYPE_REQUEST_TIMEOUT ?? file.requestTimeoutMs, 30000),
     // 二进制
     agentPath: flags.agent ?? env.REMOTETYPE_AGENT ?? file.agentPath ?? null,
+    // 文件上传的接收目录（v0.9.0+）：手机传来的文件先落盘这里，再以
+    // CF_HDROP 复制进剪贴板——剪贴板里的「文件」是磁盘引用，必须有实体路径
+    receiveDir:
+      flags.receiveDir ?? env.REMOTETYPE_RECEIVE_DIR ?? file.receiveDir ??
+      path.join(os.homedir(), 'Downloads', 'RemoteType'),
     // 对齐模式（serve 默认开启；--plain 切回旧普通模式，--align 保留兼容）
     align: flags.plain === true ? false : true,
     alignKey: flags.key ?? env.REMOTETYPE_KEY ?? file.alignKey ?? null,

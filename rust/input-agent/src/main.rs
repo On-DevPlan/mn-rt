@@ -21,6 +21,7 @@
 //!       （Node -> Rust，stdin）:  {"action":"mouse_button","button":"left","kind":"click"}
 //!       （Node -> Rust，stdin）:  {"action":"mouse_scroll","dx":0,"dy":3}
 //!       （Node -> Rust，stdin）:  {"action":"set_clipboard_image","data":"<base64 JPEG>","format":"jpeg"}
+//!       （Node -> Rust，stdin）:  {"action":"set_clipboard_files","paths":["C:\\...\\a.txt"]}
 //!       （Node -> Rust，stdin）:  {"action":"ping"}
 //! 协议（Rust -> Node，stdout）: {"ok":true,"msg":"input complete"}
 //!                               {"ok":true,"msg":"backspace complete","count":N}
@@ -29,7 +30,15 @@
 //!                               {"ok":true,"msg":"mouse_button complete","button":"left","kind":"click"}
 //!                               {"ok":true,"msg":"mouse_scroll complete","dx":0,"dy":3}
 //!                               {"ok":true,"msg":"clipboard image complete","bytes":N}
+//!                               {"ok":true,"msg":"clipboard files complete","count":N}
 //!                               {"ok":false,"msg":"reason"}
+//!
+//! 【剪贴板文件（v0.9.0+，文件模块·上传文件）】
+//! ─────────────────────────────────────
+//! * Windows 剪贴板里的「文件」是磁盘引用（CF_HDROP）而非字节——Node 侧
+//!   先把收到的文件落盘到接收目录，本指令把绝对路径挂上剪贴板
+//!   （见 clipboard_files.rs，DROPFILES + UTF-16 双 NUL 路径列表）。
+//! * 仅 Windows 实现；其余平台回 ok:false 明确错误。
 //!
 //! 【剪贴板图片（v0.8.0+，文件模块·实时拍照）】
 //! ─────────────────────────────────────
@@ -107,6 +116,8 @@ mod focus;
 mod vpad;
 #[cfg(windows)]
 mod clipboard_image;
+#[cfg(windows)]
+mod clipboard_files;
 
 /// 单次注入的最大字符数。超过则分片，片间让出时间给目标程序的消息循环。
 /// 取值偏小是刻意的：部分 IDE / 终端在一口气注入大量字符时会丢字。
@@ -247,6 +258,12 @@ pub(crate) struct Command {
     /// set_clipboard_image：图片格式（当前仅 jpeg / jpg）。
     #[serde(default)]
     pub(crate) format: Option<String>,
+    /// set_clipboard_files：待复制的绝对路径列表（v0.9.0+ 文件上传）。
+    /// Windows-only 协议表面，cfg 门与 vpad_* 字段同理（Linux 无处被读，
+    /// 不加 gate 会 dead_code 报错）。
+    #[cfg(target_os = "windows")]
+    #[serde(default)]
+    pub(crate) paths: Option<Vec<String>>,
 }
 
 /// 注入前的焦点校验。
@@ -681,6 +698,38 @@ fn handle_clipboard_image(cmd: &Command) {
     emit(json!({ "ok": false, "msg": msg }));
 }
 
+/// 处理 set_clipboard_files：把绝对路径列表以 CF_HDROP 挂上剪贴板
+/// （v0.9.0+ 文件上传）。Node 侧负责把分片重组的字节先落盘到接收目录，
+/// 本指令只做「复制引用」——与资源管理器里复制文件同语义。
+#[cfg(windows)]
+fn handle_clipboard_files(cmd: &Command) {
+    let Some(paths) = cmd.paths.as_ref().filter(|p| !p.is_empty()) else {
+        let msg = "set_clipboard_files requires paths (non-empty array)";
+        log_err(msg);
+        emit(json!({ "ok": false, "msg": msg }));
+        return;
+    };
+
+    match clipboard_files::set_clipboard_files(paths) {
+        Ok(()) => emit(json!({
+            "ok": true, "msg": "clipboard files complete", "count": paths.len()
+        })),
+        Err(reason) => {
+            log_err(&reason);
+            emit(json!({ "ok": false, "msg": reason }));
+        }
+    }
+}
+
+/// 非 Windows 平台的占位实现：明确报错，绝不静默成功。
+#[cfg(not(windows))]
+fn handle_clipboard_files(cmd: &Command) {
+    let _ = cmd;
+    let msg = "set_clipboard_files is only implemented on Windows";
+    log_err(msg);
+    emit(json!({ "ok": false, "msg": msg }));
+}
+
 /// 处理单条指令。所有错误都转成结果 JSON，保证主循环不因单条指令退出。
 fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VPadState>) {
     let trimmed = line.trim();
@@ -956,6 +1005,7 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VP
             }
         }
         "set_clipboard_image" => handle_clipboard_image(&cmd),
+        "set_clipboard_files" => handle_clipboard_files(&cmd),
         "ping" => {
             // 心跳指令：仅用于 Node 侧判断子进程是否卡死。
             // 注意：这里不构造 Enigo，避免在无图形环境下心跳也失败。

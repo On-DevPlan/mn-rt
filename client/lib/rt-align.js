@@ -393,8 +393,12 @@ class RtAlignSession extends EventEmitter {
           const r = this.imageRx.end(img);
           if (r.complete) {
             this.stats.imagesDone += 1;
-            // 完整图片交给上层写剪贴板；成功后上层回调 imageDelivered(seq)
-            this.emit('op', { op: 'image', image: r.bytes, seq });
+            // 完整载荷交给上层落剪贴板（图片）或落盘+复制（文件）；
+            // 成功后上层回调 imageDelivered(seq)
+            this.emit('op', {
+              op: 'image', image: r.bytes, seq,
+              mime: r.mime ?? 'image/jpeg', name: r.name ?? null,
+            });
           } else {
             this.stats.imagesIncomplete += 1;
             this.logger?.warn('图片传输不完整，保留缓冲等待续传', {

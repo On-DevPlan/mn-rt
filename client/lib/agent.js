@@ -287,6 +287,18 @@ class AgentManager {
     return this.send({ action: 'set_clipboard_image', data, format }, timeoutMs);
   }
 
+  /**
+   * 把一组绝对路径以 CF_HDROP 复制到剪贴板（v0.9.0+ 文件模块·上传文件）。
+   * 路径由上层先把收到的文件落盘后提供——剪贴板里的「文件」是磁盘引用，
+   * 不是字节。写剪贴板幂等，失败可整条重试。
+   * @param {string[]} paths  绝对路径列表（≤16 条）
+   * @param {number} [timeoutMs]
+   * @returns {Promise<{ok:boolean,msg?:string,count?:number}>}
+   */
+  setClipboardFiles(paths, timeoutMs = 20000) {
+    return this.send({ action: 'set_clipboard_files', paths }, timeoutMs);
+  }
+
   _send(payload, timeoutMs) {
     return new Promise((resolve, reject) => {
       if (!this.child || !this.child.stdin || this.child.stdin.destroyed) {

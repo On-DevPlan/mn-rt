@@ -36,6 +36,26 @@ function isValidImageId(id) {
   return typeof id === 'string' && /^[0-9a-f]{8}$/.test(id);
 }
 
+/** 允许的载荷类型（v0.8.0 图片 / v0.9.0 文件上传共用一条 img 通道）。 */
+const RT_IMAGE_MIMES = new Set(['image/jpeg', 'application/octet-stream']);
+/** begin.name（文件名）长度上限。 */
+const RT_IMAGE_NAME_MAX = 200;
+
+/**
+ * 清洗 begin.name：去路径分隔符与控制字符、限长。Windows 落盘命名由
+ * Node 侧再做去重，这里只保证「是一个安全的单段文件名」。
+ */
+function sanitizeFileName(raw) {
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw
+    .replace(/[\\/:*?"<>|]/g, '_')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f]/g, '')
+    .trim();
+  if (!cleaned || cleaned === '.' || cleaned === '..') return null;
+  return cleaned.length > RT_IMAGE_NAME_MAX ? cleaned.slice(0, RT_IMAGE_NAME_MAX) : cleaned;
+}
+
 /**
  * 校验并归一化手机端 img 载荷。非法返回 null（丢弃该信封的 img 部分，
  * 不影响同会话后续信封）——垃圾数据在这里挡住，绝不流向下游。
@@ -53,8 +73,10 @@ function normalizeImageOp(img) {
       if (!Number.isFinite(size) || size < 1 || size > RT_IMAGE_MAX_BYTES) return null;
       // 最后一块必须落在 (0, CHUNK] 区间，否则 n/size 自相矛盾
       if (size - (n - 1) * RT_IMAGE_CHUNK_SIZE <= 0) return null;
-      if (mime !== 'image/jpeg') return null;
-      return { op, id: img.id, n, size, mime };
+      if (!RT_IMAGE_MIMES.has(mime)) return null;
+      const name = img.name === undefined ? null : sanitizeFileName(img.name);
+      if (img.name !== undefined && name === null) return null;
+      return { op, id: img.id, n, size, mime, name };
     }
     case 'chunk': {
       const i = Math.floor(Number(img.i));
@@ -117,6 +139,8 @@ class RtImageRx extends EventEmitter {
       id: meta.id,
       n: meta.n,
       size: meta.size,
+      mime: meta.mime,
+      name: meta.name ?? null,
       buf: Buffer.alloc(meta.size),
       have: new Uint8Array(meta.n),
       got: 0,
@@ -177,10 +201,11 @@ class RtImageRx extends EventEmitter {
       return { ok: true, complete: false, got: t.got, total: t.n, missing };
     }
     const bytes = t.buf;
+    const { mime, name } = t;
     this.transfers.delete(op.id);
     this.stats.done += 1;
-    this.emit('image-complete', { id: op.id, bytes });
-    return { ok: true, complete: true, bytes };
+    this.emit('image-complete', { id: op.id, bytes, mime, name });
+    return { ok: true, complete: true, bytes, mime, name };
   }
 
   /** abort：释放缓冲。 */

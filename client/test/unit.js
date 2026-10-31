@@ -2541,13 +2541,40 @@ test('normalizeImageOp 白名单：非法载荷全部拒绝', () => {
   assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: RT_IMAGE_MAX_CHUNKS + 1, size: 10 }), null, 'n 超上限');
   assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: 12 * 1024 * 1024 + 1 }), null, 'size 超上限');
   assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: RT_IMAGE_CHUNK_SIZE }), null, 'n/size 矛盾：最后一块 ≤0');
-  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: 10, mime: 'image/png' }), null, 'mime 仅 jpeg');
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: 10, mime: 'image/png' }), null, 'mime 白名单外');
   assert.strictEqual(normalizeImageOp({ op: 'chunk', id: 'aabbccdd', i: -1, d: 'aGk=' }), null);
   assert.strictEqual(normalizeImageOp({ op: 'chunk', id: 'aabbccdd', i: 0, d: '' }), null);
   assert.strictEqual(normalizeImageOp({ op: 'wat', id: 'aabbccdd' }), null);
   const ok = normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: RT_IMAGE_CHUNK_SIZE + 1 });
   assert.notStrictEqual(ok, null);
   assert.strictEqual(ok.n, 2);
+  assert.strictEqual(ok.name, null, '图片不带 name');
+  // v0.9.0 文件上传：octet-stream + name，name 做安全清洗
+  const file = normalizeImageOp({
+    op: 'begin', id: 'aabbccdd', n: 2, size: RT_IMAGE_CHUNK_SIZE + 1,
+    mime: 'application/octet-stream', name: '..\\evil\\path:name.txt',
+  });
+  assert.notStrictEqual(file, null);
+  assert.strictEqual(file.mime, 'application/octet-stream');
+  // 分隔符/非法字符逐个替换为 _；无分隔符的 `.._...` 只是含点的普通文件名
+  assert.strictEqual(file.name, '.._evil_path_name.txt', '路径分隔符与非法字符被替换');
+  assert.strictEqual(normalizeImageOp({
+    op: 'begin', id: 'aabbccdd', n: 2, size: 10, mime: 'application/octet-stream', name: '  ',
+  }), null, '清洗后为空的 name 拒收');
+});
+
+test('end 完整返回 mime/name（v0.9.0 文件上传路由依据）', () => {
+  const { RtImageRx, RT_IMAGE_CHUNK_SIZE } = require('../lib/rt-image');
+  const rx = new RtImageRx();
+  const id = RtImageRx.newId();
+  const size = RT_IMAGE_CHUNK_SIZE + 4;
+  rx.begin({ op: 'begin', id, n: 2, size, mime: 'application/octet-stream', name: '报告.pdf' });
+  rx.chunk({ op: 'chunk', id, i: 0, d: Buffer.alloc(RT_IMAGE_CHUNK_SIZE, 1).toString('base64') });
+  rx.chunk({ op: 'chunk', id, i: 1, d: Buffer.alloc(4, 2).toString('base64') });
+  const r = rx.end({ op: 'end', id });
+  assert.strictEqual(r.complete, true);
+  assert.strictEqual(r.mime, 'application/octet-stream');
+  assert.strictEqual(r.name, '报告.pdf');
 });
 
 test('LRU 与过期：半成品受数量与保留期双向约束', () => {
