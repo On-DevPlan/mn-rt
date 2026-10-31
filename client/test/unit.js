@@ -1393,6 +1393,18 @@ test('parseArgs：--no-save 归一化为 noSave', () => {
   assert.strictEqual(flags.noSave, true);
 });
 
+test('config：--debug 别名 → logLevel debug；显式 --log-level 优先', () => {
+  withTempHome(() => {
+    const { parseArgs, loadConfig } = require('../lib/config');
+    const dbg = loadConfig(parseArgs(['serve', '--debug']).flags);
+    assert.strictEqual(dbg.logLevel, 'debug');
+    const both = loadConfig(parseArgs(['serve', '--debug', '--log-level', 'info']).flags);
+    assert.strictEqual(both.logLevel, 'info', '显式 --log-level 优先于 --debug');
+    const none = loadConfig(parseArgs(['serve']).flags);
+    assert.strictEqual(none.logLevel, 'info');
+  });
+});
+
 // ================= 配置目录 ~/.nx-rt：环境变量优先级 + 旧目录迁移 =================
 
 test('configDir：NX_RT_HOME 优先于 REMOTETYPE_HOME，都无时默认 ~/.nx-rt', () => {

@@ -311,6 +311,14 @@ class AgentManager {
         }
       }
 
+      // debug：指令流向注入引擎——排障时看「发没发、发了什么、多大」
+      this.logger?.debug('agent ← cmd', {
+        action: payload.action,
+        textLen: payload.text?.length,
+        dataB64Len: payload.data?.length,
+        paths: payload.paths?.length,
+        combo: payload.modifiers ? [...payload.modifiers, payload.key].join('+') : payload.key,
+      });
       const line = `${JSON.stringify(payload)}\n`;
       const entry = {
         payload,

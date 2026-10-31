@@ -137,6 +137,10 @@ class ServeClient extends EventEmitter {
       // 转发下来的文本
       if (typeof msg.text === 'string') {
         this.stats.messages += 1;
+        // debug：手机 → PC 的业务帧入流（text 字段承载 RT1 信封）
+        this.logger?.debug('text frame ← serve', {
+          textLen: msg.text.length, clientId: msg.clientId,
+        });
         this.emit('text', { text: msg.text, clientId: msg.clientId, ts: msg.ts });
         return;
       }
@@ -219,6 +223,13 @@ class ServeClient extends EventEmitter {
   _send(obj) {
     if (!this.connected) return false;
     try {
+      // debug：PC → serve 的帧流向（register/ping/ack——ack 是手机端进度
+      // 确认的来源，排障「手机端进度不动」时按帧对账）
+      this.logger?.debug('frame → serve', {
+        type: obj.type,
+        phoneId: obj.phoneId,
+        appliedSeq: obj.ack?.applied_seq,
+      });
       this.ws.send(JSON.stringify(obj));
       return true;
     } catch (e) {

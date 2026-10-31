@@ -386,7 +386,13 @@ class RtAlignSession extends EventEmitter {
         }
         case 'chunk': {
           const r = this.imageRx.chunk(img);
-          if (r.ok) this._sendAck(seq);
+          if (r.ok) {
+            // debug：排障「手机端进度不动」时的关键流向——每块的受理与确认
+            this.logger?.debug('img chunk 已确认落袋', {
+              seq, i: img.i, got: r.got, total: r.total,
+            });
+            this._sendAck(seq);
+          }
           break;
         }
         case 'end': {

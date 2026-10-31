@@ -5,6 +5,22 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.9.1] — 2026-10-31
+
+### feat(client): `--debug` 启动参数——排障观察事件与日志流向
+
+- `serve --debug` = `--log-level debug` 的快捷别名（显式 `--log-level`
+  优先级更高）。
+- 补三类关键流向的 debug 日志，排障不再靠猜：
+  - **ws-client**：PC → serve 的每条帧（register / ping / **ack**，ack 带
+    applied_seq）+ 手机 → PC 的 text 帧入流（长度 + clientId）；
+  - **rt-align**：img 通道**逐块受理并确认落袋**（seq/i/got/total）——
+    「手机端进度不动」这类问题按帧对账；
+  - **agent**：发往注入引擎的每条指令（action / 长度 / 路径 / 组合键）。
+- 排障用法：`npx nx-rt serve --debug` 后手机发一张图，应能看到
+  `text frame ← → img chunk 已确认落袋 → frame → serve(ack)` 的完整闭环；
+  断在哪一环，问题就在哪一端。
+
 ## [0.9.0] — 2026-10-31
 
 ### feat(rt): 文件上传——手机任意文件 → PC 系统 temp 落盘 + CF_HDROP 复制（img 通道扩展）

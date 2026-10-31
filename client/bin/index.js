@@ -98,6 +98,8 @@ ${C.bold}选项${C.reset}
   --enter-mode <mode>    文本换行的注入方式：raw（默认）| enter | shift_enter。
                          微信等「Enter=发送」的输入框用 shift_enter 才能换行
   --no-save              本次连接不把 url/key/token 写入配置文件
+  --debug                等价 --log-level debug：WS 帧流向 / img 逐块确认 /
+                         发往注入引擎的每条指令全部打印（排障用）
   --log-level <level>    debug | info | warn | error（默认 info）
   --max-queue <n>        本地消息队列上限（默认 100）
   --max-text <n>         单条文本最大长度，超出截断（默认 5000）

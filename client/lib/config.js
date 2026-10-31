@@ -546,7 +546,11 @@ function loadConfig(flags = {}) {
   const cfg = {
     url,
     clientId: flags.clientId ?? env.REMOTETYPE_CLIENT_ID ?? file.clientId ?? ensureClientId(),
-    logLevel: flags.logLevel ?? env.REMOTETYPE_LOG_LEVEL ?? file.logLevel ?? 'info',
+    // --debug = --log-level debug 的快捷别名（排障用：WS 帧流向 / img 逐块
+    // 确认 / 发往注入引擎的每条指令都会打出来）。显式 --log-level 优先级更高。
+    logLevel: flags.logLevel ??
+      (flags.debug === true ? 'debug' : null) ??
+      env.REMOTETYPE_LOG_LEVEL ?? file.logLevel ?? 'info',
     logDir: flags.logDir ?? env.REMOTETYPE_LOG_DIR ?? file.logDir ?? path.join(configDir(), 'logs'),
     recordFile:
       flags.recordFile ?? env.REMOTETYPE_RECORD_FILE ?? file.recordFile ??
