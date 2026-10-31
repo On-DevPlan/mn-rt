@@ -255,10 +255,14 @@ pub(crate) struct Command {
     #[serde(default)]
     pub(crate) vpad_value_bool: Option<bool>,
     /// set_clipboard_image：完整图片字节（base64 编码的 JPEG/PNG，v0.8.0+）。
+    /// Windows-only 协议表面，cfg 门与 vpad_* / paths 字段同理（Linux 无处被读，
+    /// 不加 gate 会 dead_code 报错）。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) data: Option<String>,
     /// set_clipboard_image：图片格式声明（jpeg / png）。仅作提示——引擎按
     /// 字节魔数嗅探真实格式解码，声明与实际不符时以字节为准。
+    #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) format: Option<String>,
     /// set_clipboard_files：待复制的绝对路径列表（v0.9.0+ 文件上传）。
