@@ -1301,9 +1301,10 @@ mod tests {
         assert_eq!(scroll.dy, Some(3));
     }
 
-    // ── 剪贴板图片 ──────────────────────────────────────────────────────
+    // ── 剪贴板图片（字段为 windows-only 表面，测试同门）────────────────────
 
     #[test]
+    #[cfg(windows)]
     fn command_parses_clipboard_image_action() {
         let cmd: Command = serde_json::from_str(
             r#"{"action":"set_clipboard_image","data":"aGVsbG8=","format":"jpeg"}"#,
@@ -1314,6 +1315,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn command_clipboard_image_fields_optional() {
         // format 缺省 = jpeg；data 缺失由 handler 报错
         let cmd: Command =
