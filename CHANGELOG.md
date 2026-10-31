@@ -5,6 +5,26 @@
 
 本文件自 v0.6.1 起维护；此前版本由 git tag / commit 历史回溯补录。
 
+## [0.9.0] — 2026-10-31
+
+### feat(rt): 文件上传——手机任意文件 → PC 接收目录落盘 + CF_HDROP 复制（img 通道扩展）
+
+文件模块第二个能力：手机选任意文件（≤10MB），复用同一条 img 加密分片
+通道上传，PC 端落盘到接收目录（`--receive-dir`，默认
+`~/Downloads/RemoteType`）后以 CF_HDROP 复制进剪贴板。剪贴板里的「文件」
+是**磁盘引用而非字节**——必须先有实体文件，Ctrl+V 在资源管理器/微信/QQ
+粘贴为文件。ACK 语义不变：end 的 ACK = 落盘 + 复制完成。
+
+- input-agent 新增 `set_clipboard_files`（仅 Windows）：DROPFILES +
+  UTF-16 双 NUL 路径列表，≤16 条路径，时序与剪贴板图片同款。
+- rt-image begin 白名单扩展 mime `application/octet-stream` + 可选 `name`
+  （清洗路径分隔符/非法字符，≤200 字符）；end 完整回传 mime/name 供路由。
+- 图片/文件泵按 mime 路由：`image/jpeg` → 剪贴板图片（CF_DIB）；
+  `octet-stream` → 落盘接收目录 + `set_clipboard_files`。
+- 手机端（fr 1.3.0）文件面板加「上传文件」图标入口（file_picker 既有依赖），
+  动作区改双图标弱化色。
+- e2e 冒烟扩展为图片+文件双传输，断言接收目录里文件真实存在。
+
 ## [0.8.1] — 2026-10-31
 
 - fix: 随包 linux-x64 二进制补到含图片通道的产物。0.8.0 的 npm 包里
