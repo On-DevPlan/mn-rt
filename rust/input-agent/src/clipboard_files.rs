@@ -127,7 +127,7 @@ mod tests {
         // 头 20 字节
         assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 20);
         assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 1); // fWide
-        // 路径 UTF-16 + 两个 NUL
+                                                                              // 路径 UTF-16 + 两个 NUL
         let wide: Vec<u8> = "C:\\a\\b.txt"
             .encode_utf16()
             .flat_map(|w| w.to_le_bytes())
@@ -139,7 +139,8 @@ mod tests {
 
     #[test]
     fn build_hdrop_multiple_paths() {
-        let bytes = build_hdrop(&[("C:\\1.txt").to_string(), ("D:\\2.bin").to_string()]).expect("ok");
+        let bytes =
+            build_hdrop(&[("C:\\1.txt").to_string(), ("D:\\2.bin").to_string()]).expect("ok");
         let tail = &bytes[20..];
         let words: Vec<u16> = tail
             .chunks(2)

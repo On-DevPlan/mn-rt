@@ -430,7 +430,14 @@ mod tests {
         .iter()
         .flat_map(|v| v.to_be_bytes())
         .collect();
-        let png = encode_png(2, 1, png::ColorType::Rgba, png::BitDepth::Sixteen, &raw, None);
+        let png = encode_png(
+            2,
+            1,
+            png::ColorType::Rgba,
+            png::BitDepth::Sixteen,
+            &raw,
+            None,
+        );
         let (_, _, bgra) = decode_image_to_bgra(&png).expect("decode ok");
         // STRIP_16 保留高字节：R 0x11 G 0x33 B 0x55 A 0x77 → BGRA
         assert_eq!(bgra, vec![0x55, 0x33, 0x11, 0x77, 0xDD, 0xBB, 0x99, 0xFF]);

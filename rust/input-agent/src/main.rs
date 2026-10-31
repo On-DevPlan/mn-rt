@@ -114,12 +114,12 @@ use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Se
 use serde::Deserialize;
 use serde_json::json;
 
-mod focus;
-mod vpad;
-#[cfg(windows)]
-mod clipboard_image;
 #[cfg(windows)]
 mod clipboard_files;
+#[cfg(windows)]
+mod clipboard_image;
+mod focus;
+mod vpad;
 
 /// 单次注入的最大字符数。超过则分片，片间让出时间给目标程序的消息循环。
 /// 取值偏小是刻意的：部分 IDE / 终端在一口气注入大量字符时会丢字。
@@ -676,7 +676,12 @@ fn handle_clipboard_image(cmd: &Command) {
         emit(json!({ "ok": false, "msg": msg }));
         return;
     };
-    let format = cmd.format.as_deref().unwrap_or("jpeg").trim().to_ascii_lowercase();
+    let format = cmd
+        .format
+        .as_deref()
+        .unwrap_or("jpeg")
+        .trim()
+        .to_ascii_lowercase();
     if format != "jpeg" && format != "jpg" && format != "png" {
         let msg = format!("unsupported image format: {format:?} (expected jpeg/png)");
         log_err(&msg);
