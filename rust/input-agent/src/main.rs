@@ -20,7 +20,7 @@
 //!       （Node -> Rust，stdin）:  {"action":"mouse_move","dx":12,"dy":-5}
 //!       （Node -> Rust，stdin）:  {"action":"mouse_button","button":"left","kind":"click"}
 //!       （Node -> Rust，stdin）:  {"action":"mouse_scroll","dx":0,"dy":3}
-//!       （Node -> Rust，stdin）:  {"action":"set_clipboard_image","data":"<base64 JPEG>","format":"jpeg"}
+//!       （Node -> Rust，stdin）:  {"action":"set_clipboard_image","data":"<base64 图片字节>","format":"jpeg|png"}
 //!       （Node -> Rust，stdin）:  {"action":"set_clipboard_files","paths":["C:\\...\\a.txt"]}
 //!       （Node -> Rust，stdin）:  {"action":"ping"}
 //! 协议（Rust -> Node，stdout）: {"ok":true,"msg":"input complete"}
@@ -42,9 +42,11 @@
 //!
 //! 【剪贴板图片（v0.8.0+，文件模块·实时拍照）】
 //! ─────────────────────────────────────
-//! * Node 侧把分片重组完成的完整 JPEG（base64）经一条 stdin 指令送进来，
-//!   Rust 侧解码成 BGRA 像素后拼 CF_DIB 写入系统剪贴板（见 clipboard_image.rs，
-//!   与 Ditto 的主粘贴路径同款）。图片写入是幂等动作，失败可整条重试。
+//! * Node 侧把分片重组完成的完整图片（base64，JPEG 或 PNG）经一条 stdin 指令
+//!   送进来，Rust 侧按字节魔数嗅探真实格式（协议 format 声明仅作提示，手机端
+//!   曾把图库 PNG 按 image/jpeg 发来）解码成 BGRA 像素后拼 CF_DIB 写入系统
+//!   剪贴板（见 clipboard_image.rs，与 Ditto 的主粘贴路径同款）。图片写入是
+//!   幂等动作，失败可整条重试。
 //! * 仅 Windows 实现；其他平台回 ok:false 的明确错误，不静默成功。
 //! * 大小防御：解码字节 ≤ 12MB、像素 ≤ 60MP，超限报错不写剪贴板。
 //!
@@ -252,10 +254,11 @@ pub(crate) struct Command {
     #[cfg(target_os = "windows")]
     #[serde(default)]
     pub(crate) vpad_value_bool: Option<bool>,
-    /// set_clipboard_image：完整图片字节（base64 编码的 JPEG，v0.8.0+）。
+    /// set_clipboard_image：完整图片字节（base64 编码的 JPEG/PNG，v0.8.0+）。
     #[serde(default)]
     pub(crate) data: Option<String>,
-    /// set_clipboard_image：图片格式（当前仅 jpeg / jpg）。
+    /// set_clipboard_image：图片格式声明（jpeg / png）。仅作提示——引擎按
+    /// 字节魔数嗅探真实格式解码，声明与实际不符时以字节为准。
     #[serde(default)]
     pub(crate) format: Option<String>,
     /// set_clipboard_files：待复制的绝对路径列表（v0.9.0+ 文件上传）。
@@ -660,27 +663,28 @@ fn mouse_scroll(enigo: &mut Enigo, dx: i32, dy: i32) -> Result<(), String> {
     Ok(())
 }
 
-/// 处理 set_clipboard_image：base64 JPEG → CF_DIB 写入系统剪贴板。
+/// 处理 set_clipboard_image：base64 图片（JPEG/PNG）→ CF_DIB 写入系统剪贴板。
 ///
 /// 参数全部先校验、后解码，无效指令不触碰剪贴板。写剪贴板是幂等动作
-/// （与按键注入的「宁少勿多」相反），失败可整条重试。
+/// （与按键注入的「宁少勿多」相反），失败可整条重试。format 声明只做
+/// 枚举校验（拦明显乱来的调用方），真实格式由字节魔数决定。
 #[cfg(windows)]
 fn handle_clipboard_image(cmd: &Command) {
     let Some(data) = cmd.data.as_deref().filter(|s| !s.is_empty()) else {
-        let msg = "set_clipboard_image requires data (base64 jpeg)";
+        let msg = "set_clipboard_image requires data (base64 jpeg/png)";
         log_err(msg);
         emit(json!({ "ok": false, "msg": msg }));
         return;
     };
     let format = cmd.format.as_deref().unwrap_or("jpeg").trim().to_ascii_lowercase();
-    if format != "jpeg" && format != "jpg" {
-        let msg = format!("unsupported image format: {format:?} (expected jpeg)");
+    if format != "jpeg" && format != "jpg" && format != "png" {
+        let msg = format!("unsupported image format: {format:?} (expected jpeg/png)");
         log_err(&msg);
         emit(json!({ "ok": false, "msg": msg }));
         return;
     }
 
-    match clipboard_image::set_image_jpeg(data) {
+    match clipboard_image::set_image(data) {
         Ok(n) => emit(json!({ "ok": true, "msg": "clipboard image complete", "bytes": n })),
         Err(reason) => {
             log_err(&reason);

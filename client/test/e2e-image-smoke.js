@@ -66,7 +66,7 @@ function spawnChild(tag, cmd, args, cwd) {
 
 /** 假手机端：注册 → 分片 → seal → 逐块发送 → 收 ACK 直到最后一块被确认。 */
 async function phoneSide() {
-  const jpeg = fs.readFileSync(IMAGE);
+  const imageBytes = fs.readFileSync(IMAGE);
   const derived = deriveFromKey(KEY);
   const sid = 'e2e1';
   let seq = 1;
@@ -116,8 +116,7 @@ async function phoneSide() {
       const d = bytes.subarray(i * RT_IMAGE_CHUNK_SIZE, Math.min((i + 1) * RT_IMAGE_CHUNK_SIZE, bytes.length));
       sendEnvelope({ img: { op: 'chunk', id, i, d: d.toString('base64') }, ts: Date.now(), phoneId: 'smoke-phone' }, seq);
       seq += 1;
-    }
-    const endSeq = seq;
+    }    const endSeq = seq;
     sendEnvelope({ img: { op: 'end', id }, ts: Date.now(), phoneId: 'smoke-phone' }, endSeq);
     seq += 1;
 
@@ -129,13 +128,18 @@ async function phoneSide() {
     throw new Error(`传输 ${id} 最后一块(${endSeq})在 ${ACK_TIMEOUT_MS}ms 内未获 ACK；收到 ${JSON.stringify(ackAppliedSeqs)}`);
   };
 
-  // 1) 图片：JPEG → 剪贴板 CF_DIB
-  const img = await runTransfer({ id: 'aaaa0001', mime: 'image/jpeg', bytes: jpeg });
+  // 1) 图片：JPEG → 剪贴板 CF_DIB。PNG 夹具（v0.9.2）多跑一发规范声明
+  //    image/png（白名单路由）；第一发固定按老事故形态发——PNG 字节 +
+  //    image/jpeg 声明，引擎必须按魔数嗅探兜底成功。
+  const isPng = imageBytes[0] === 0x89 && imageBytes[1] === 0x50 && imageBytes[2] === 0x4e && imageBytes[3] === 0x47;
+  const img = await runTransfer({ id: 'aaaa0001', mime: 'image/jpeg', bytes: imageBytes });
+  let imgPng = null;
+  if (isPng) imgPng = await runTransfer({ id: 'aaaa0002', mime: 'image/png', bytes: imageBytes });
   // 2) 文件（v0.9.0）：octet-stream + name → 接收目录落盘 + CF_HDROP 复制
   const fileBytes = Buffer.from(`RemoteType e2e 文件通道冒烟 ${new Date().toISOString()}\n`.repeat(40));
   const file = await runTransfer({ id: 'bbbb0002', mime: 'application/octet-stream', name: 'e2e-smoke.txt', bytes: fileBytes });
   ws.close();
-  return { img, file };
+  return { img, imgPng, file };
 }
 
 
@@ -168,12 +172,13 @@ async function main() {
   ], CLIENT_ROOT);
   await sleep(1200); // 等注册与 agent 就绪
 
-  const { img, file } = await phoneSide();
+  const { img, imgPng, file } = await phoneSide();
   const received = path.join(tmp, 'received', 'e2e-smoke.txt');
   if (!fs.existsSync(received)) {
     throw new Error(`文件通道落盘失败：${received} 不存在`);
   }
-  log('main', `PASS：图片 ${img.chunks} 块 + 文件 ${file.chunks} 块全部确认；图片进过剪贴板、文件已落盘 ${received} 并以 CF_HDROP 复制`);
+  const pngText = imgPng ? ` + PNG 规范声明 ${imgPng.chunks} 块` : '';
+  log('main', `PASS：图片 ${img.chunks} 块${pngText} + 文件 ${file.chunks} 块全部确认；图片进过剪贴板、文件已落盘 ${received} 并以 CF_HDROP 复制`);
 }
 
 main()

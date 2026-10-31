@@ -2553,7 +2553,12 @@ test('normalizeImageOp 白名单：非法载荷全部拒绝', () => {
   assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: RT_IMAGE_MAX_CHUNKS + 1, size: 10 }), null, 'n 超上限');
   assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: 12 * 1024 * 1024 + 1 }), null, 'size 超上限');
   assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: RT_IMAGE_CHUNK_SIZE }), null, 'n/size 矛盾：最后一块 ≤0');
-  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 2, size: 10, mime: 'image/png' }), null, 'mime 白名单外');
+  // mime 用例必须用自洽的 n/size（n/size 矛盾在 mime 检查之前就拦下）
+  assert.strictEqual(normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 1, size: 10, mime: 'image/webp' }), null, 'mime 白名单外');
+  // v0.9.2 起 image/png 在白名单内（手机图库截图是 PNG），走剪贴板路由
+  const png = normalizeImageOp({ op: 'begin', id: 'aabbccdd', n: 1, size: 10, mime: 'image/png' });
+  assert.notStrictEqual(png, null, 'image/png 白名单内');
+  assert.strictEqual(png.mime, 'image/png');
   assert.strictEqual(normalizeImageOp({ op: 'chunk', id: 'aabbccdd', i: -1, d: 'aGk=' }), null);
   assert.strictEqual(normalizeImageOp({ op: 'chunk', id: 'aabbccdd', i: 0, d: '' }), null);
   assert.strictEqual(normalizeImageOp({ op: 'wat', id: 'aabbccdd' }), null);

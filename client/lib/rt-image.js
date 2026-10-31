@@ -36,8 +36,11 @@ function isValidImageId(id) {
   return typeof id === 'string' && /^[0-9a-f]{8}$/.test(id);
 }
 
-/** 允许的载荷类型（v0.8.0 图片 / v0.9.0 文件上传共用一条 img 通道）。 */
-const RT_IMAGE_MIMES = new Set(['image/jpeg', 'application/octet-stream']);
+/** 允许的载荷类型（v0.8.0 图片 / v0.9.0 文件上传共用一条 img 通道）。
+ * v0.9.2 起接受 image/png：手机图库截图是 PNG（拍摄才是 JPEG）。
+ * 注意这只是路由分流声明——引擎解码按字节魔数嗅探真实格式，
+ * 声明与实际不符（如 PNG 字节按 jpeg 发来）也能正确落剪贴板。 */
+const RT_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'application/octet-stream']);
 /** begin.name（文件名）长度上限。 */
 const RT_IMAGE_NAME_MAX = 200;
 

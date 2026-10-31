@@ -278,8 +278,8 @@ class AgentManager {
   /**
    * 写入一张图片到系统剪贴板（v0.8.0+ 文件模块·实时拍照）。
    * 写剪贴板是幂等动作，失败可整条重试；大图解码留足超时余量。
-   * @param {string} data      base64 编码的完整 JPEG（≤12MB 原始字节）
-   * @param {string} [format]  当前仅 'jpeg'
+   * @param {string} data      base64 编码的完整图片（JPEG/PNG，≤12MB 原始字节）
+   * @param {string} [format]  'jpeg' | 'png'——仅提示，引擎按字节魔数嗅探真实格式
    * @param {number} [timeoutMs]
    * @returns {Promise<{ok:boolean,msg?:string,bytes?:number}>}
    */

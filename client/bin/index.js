@@ -764,10 +764,10 @@ async function cmdServe(cfg, flags = {}) {
     });
   };
 
-  // 图片/文件泵（文件模块 v0.8.0 拍照 / v0.9.0 上传文件）：绕过串行队列——
-  // 写剪贴板可能耗数百毫秒（10MB 图的 JPEG 解码），不能卡住打字。同一时刻
+  // 图片/文件泵（文件模块 v0.8.0 拍照 / v0.9.0 上传文件 / v0.9.2 PNG）：绕过串行队列——
+  // 写剪贴板可能耗数百毫秒（10MB 图的解码），不能卡住打字。同一时刻
   // 只处理一个；忙时丢弃整个载荷：手机端最后一块等不到 ACK 会按同 id 续传
-  // 重试，不会丢数据。mime 路由：image/jpeg → 剪贴板图片（CF_DIB）；
+  // 重试，不会丢数据。mime 路由：image/jpeg、image/png → 剪贴板图片（CF_DIB）；
   // application/octet-stream → 先落盘接收目录、再以 CF_HDROP 复制（剪贴板
   // 里的「文件」是磁盘引用，不是字节——必须先有实体文件）。
   let imageBusy = false;
@@ -810,7 +810,10 @@ async function cmdServe(cfg, flags = {}) {
           storeStatus = 'clipboard_file';
           storeText = saved;
         } else {
-          res = await agent.setClipboardImage(op.image.toString('base64'));
+          // format 只是提示；引擎按字节魔数嗅探真实格式（手机端会把图库
+          // PNG 按 image/jpeg 发来），声明错了也能正确写剪贴板
+          const format = op.mime === 'image/png' ? 'png' : 'jpeg';
+          res = await agent.setClipboardImage(op.image.toString('base64'), format);
           okText = '图片已写入系统剪贴板（Ctrl+V 即可粘贴）';
         }
         if (res?.ok) {

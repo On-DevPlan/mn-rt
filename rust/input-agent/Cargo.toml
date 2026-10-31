@@ -38,10 +38,13 @@ vigem-client = { version = "0.1", default-features = false }
 
 # ── 剪贴板图片（set_clipboard_image，v0.8.0+）──
 # 仅 Windows 声明：Linux/macOS 的剪贴板图片是未实现路径，不为其付出二进制体积。
-# base64 解码信封里的图片字节；zune-jpeg 解码成 BGRA 像素后手工拼 CF_DIB
-# （与 Ditto 的主路径同款：BITMAPINFOHEADER + 自底向上像素行）。
+# base64 解码信封里的图片字节；JPEG 走 zune-jpeg，PNG 走 png（v0.9.2+：
+# 图库截图是 PNG，手机端曾按 image/jpeg 声明发来，引擎按魔数嗅探真实格式）。
+# 解码成 BGRA 像素后手工拼 CF_DIB（与 Ditto 的主路径同款：
+# BITMAPINFOHEADER + 自底向上像素行）。
 base64 = "0.22"
 zune-jpeg = "0.4"
+png = "0.17"
 
 # Linux 独立新建 X 连接做 GetInputFocus（与 enigo 的 x11rb 连接互不干扰）
 [target.'cfg(target_os = "linux")'.dependencies]
