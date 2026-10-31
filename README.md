@@ -57,6 +57,10 @@ npx nx-rt serve --key MYKEY123                    # 两端用同一个 key
 # 服务器：node server/src/server.js（开启统一登录见 server/DEPLOY.md）
 ```
 
+> **npx 版本提示**：`npx nx-rt`（不带版本号）会永久复用 npm 的 `_npx` 缓存，
+> 发新版后可能一直跑旧版本。要确保最新，用 `npx nx-rt@latest`；
+> `serve` 启动时也会自检新版本并提示升级（`--no-update-check` 关闭）。
+
 ### 协议要点（RT1 直连版）
 
 - **一 key 三用**：key 归一化后 PBKDF2→HKDF 派生 配对盐/AAD 上下文/双方向 AES 密钥；
