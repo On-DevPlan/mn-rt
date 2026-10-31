@@ -802,7 +802,9 @@ async function cmdServe(cfg, flags = {}) {
         if (op.mime === 'application/octet-stream') {
           const saved = await saveReceivedFile(op.image, op.name);
           res = await agent.setClipboardFiles([saved]);
-          okText = '文件已复制到电脑剪贴板，Ctrl+V 即可粘贴';
+          // 日志必须带落盘位置：temp 里属于可回收的临时文件，用户想留档
+          // 得靠这条日志知道去哪捞
+          okText = `文件已复制到电脑剪贴板（${saved}），Ctrl+V 即可粘贴；temp 会被系统回收，需留档请移出`;
           storeStatus = 'clipboard_file';
           storeText = saved;
         } else {

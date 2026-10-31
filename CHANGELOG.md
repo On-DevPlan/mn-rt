@@ -7,13 +7,15 @@
 
 ## [0.9.0] — 2026-10-31
 
-### feat(rt): 文件上传——手机任意文件 → PC 接收目录落盘 + CF_HDROP 复制（img 通道扩展）
+### feat(rt): 文件上传——手机任意文件 → PC 系统 temp 落盘 + CF_HDROP 复制（img 通道扩展）
 
 文件模块第二个能力：手机选任意文件（≤10MB），复用同一条 img 加密分片
-通道上传，PC 端落盘到接收目录（`--receive-dir`，默认
-`~/Downloads/RemoteType`）后以 CF_HDROP 复制进剪贴板。剪贴板里的「文件」
-是**磁盘引用而非字节**——必须先有实体文件，Ctrl+V 在资源管理器/微信/QQ
-粘贴为文件。ACK 语义不变：end 的 ACK = 落盘 + 复制完成。
+通道上传，PC 端落盘到**系统 temp**（`os.tmpdir()/RemoteType`，可用
+`--receive-dir` 覆盖）后以 CF_HDROP 复制进剪贴板。传输属临时性质：temp
+可被系统与清理工具安全回收，每次落盘的完整路径都写在日志里，想留档
+自行移出 temp。剪贴板里的「文件」是**磁盘引用而非字节**——必须先有
+实体文件，Ctrl+V 在资源管理器/微信/QQ 粘贴为文件。ACK 语义不变：
+end 的 ACK = 落盘 + 复制完成。
 
 - input-agent 新增 `set_clipboard_files`（仅 Windows）：DROPFILES +
   UTF-16 双 NUL 路径列表，≤16 条路径，时序与剪贴板图片同款。
