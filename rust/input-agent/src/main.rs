@@ -17,6 +17,9 @@
 //!       （Node -> Rust，stdin）:  {"action":"type_text","text":"...","enter_mode":"shift_enter"}
 //!       （Node -> Rust，stdin）:  {"action":"backspace","count":N}
 //!       （Node -> Rust，stdin）:  {"action":"hotkey","key":"return","modifiers":["shift"]}
+//!       （Node -> Rust，stdin）:  {"action":"hotkey","key":"backspace","kind":"press"}
+//!       （kind: 缺省 click 单击 / press 按下不松 / release 松开——press 后
+//!        由 OS 键盘自动重复接管连发，如长按退格持续删除）
 //!       （Node -> Rust，stdin）:  {"action":"mouse_move","dx":12,"dy":-5}
 //!       （Node -> Rust，stdin）:  {"action":"mouse_button","button":"left","kind":"click"}
 //!       （Node -> Rust，stdin）:  {"action":"mouse_scroll","dx":0,"dy":3}
@@ -100,15 +103,26 @@
 //! Shift+Enter…）。时序：修饰键 Press → 小延时 → 主键 Click → 逆序 Release。
 //! 与 backspace 同理，键事件失败不做重试：失败的按键可能实际已送达，
 //! 重试有多发风险（聊天框里 = 误发消息），宁少勿多，由上层决定整条重发。
+//!
+//! 【按住原语】
+//! ────────────────
+//! hotkey 支持 kind=press / release 两段式：press（修饰键 Press → 主键
+//! Press，均不松开）后由 OS 键盘自动重复接管连发——长按退格持续删除、
+//! 重复延迟/重复率完全走系统键盘设置，与真实按住手感一致。release 信封
+//! 只用来匹配主键名；松开时按按下时注册的修饰键集合逆序松干净，手机端
+//! 漏带修饰键也不会卡键。安全性兜底：引擎在注册表里记录按住中的组合键，
+//! 主循环每 200ms 检查，超过 HOTKEY_HOLD_TIMEOUT_MS 仍无 release（手机
+//! 断线/崩溃）则强制松开——否则 OS 会一直重复按键（退格 = 一直删字）。
 
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 // AtomicUsize 仅 unix 信号处理用到，其他平台不引入避免 unused 警告
 #[cfg(unix)]
 use std::sync::atomic::AtomicUsize;
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use serde::Deserialize;
@@ -140,6 +154,14 @@ const BACKSPACE_DELAY_MS: u64 = 10;
 /// 修饰键按下 / 主键敲击 / 松开之间留出间隙：部分应用（Electron、IME
 /// 活跃时）对同一毫秒内连发的键事件处理不稳。
 const HOTKEY_DELAY_MS: u64 = 15;
+/// hotkey 按住（kind=press）的兜底超时（毫秒）：手机断线/崩溃收不到
+/// release 时，OS 自动重复会一直按键（退格 = 一直删字）。超过此时长
+/// 主循环强制松开。取值远大于正常按住时长（OS 重复率 30 次/秒 × 20s
+/// ≈ 600 次触发），只兜异常，不干扰正常长按。
+const HOTKEY_HOLD_TIMEOUT_MS: u64 = 20_000;
+/// 主循环无指令时的等待粒度（毫秒）：按住超时兜底的检查间隔，
+/// 也是退出信号（running 标志）的响应延迟上界。
+const HOLD_POLL_MS: u64 = 200;
 /// mouse_move 单条指令 |dx|/|dy| 的上限。正常触摸板单帧增量远小于此；
 /// 异常大值只可能是上游 bug 或恶意报文，截断防指针飞出屏幕。
 const MOUSE_MOVE_MAX: i32 = 2000;
@@ -208,7 +230,9 @@ pub(crate) struct Command {
     /// mouse_button：目标键（left / right / middle）。
     #[serde(default)]
     pub(crate) button: Option<String>,
-    /// mouse_button：动作（click / press / release）。
+    /// 动作（click / press / release）。mouse_button 必填；hotkey 可选——
+    /// 缺省 click（旧客户端兼容），press / release 组成「按住」原语
+    /// （见 HeldCombo 与 handle_line 的 hotkey 分支）。
     #[serde(default)]
     pub(crate) kind: Option<String>,
     // ── vpad_*（v0.7.0+ Windows 虚拟 Xbox 360 手柄）────────────────
@@ -573,7 +597,57 @@ fn parse_modifier_name(name: &str) -> Result<Key, String> {
     }
 }
 
-/// 注入一次组合键：修饰键依次按下 → 主键单击 → 修饰键逆序松开。
+/// 当前按住中的 hotkey（kind=press 时注册，release / 超时兜底时注销）。
+///
+/// 修饰键集合以按下那一刻的信封为准：release 信封只用来匹配主键名，
+/// 松开时按注册集合逆序松干净——手机端 release 漏带修饰键也不会卡死
+/// 修饰键。`started` 供主循环超时兜底判断。
+struct HeldCombo {
+    main: Key,
+    /// 主键名（规范化小写）。与 `main` 并存是因为 release 匹配按名字做，
+    /// 不依赖 enigo Key 的 PartialEq。
+    main_name: String,
+    modifiers: Vec<Key>,
+    started: Instant,
+}
+
+/// 按下不松开（kind=press）：修饰键依次按下 → 主键按下。
+///
+/// 修饰键留待 release / 超时兜底松开；主键按下后由 OS 键盘自动重复
+/// 接管连发（重复延迟 / 重复率走系统键盘设置），引擎不再参与。
+/// 任一步失败即返回 Err：调用方丢弃实例，Drop 兜底松开已按下的键。
+fn hold_combo(enigo: &mut Enigo, main: Key, modifiers: &[Key]) -> Result<(), String> {
+    for m in modifiers {
+        enigo
+            .key(*m, Direction::Press)
+            .map_err(|e| format!("press modifier failed: {e}"))?;
+        thread::sleep(Duration::from_millis(HOTKEY_DELAY_MS));
+    }
+    enigo
+        .key(main, Direction::Press)
+        .map_err(|e| format!("hotkey press failed: {e}"))
+}
+
+/// 松开一次按住（kind=release）：主键先松 → 修饰键逆序后松。
+///
+/// 修饰键松开失败必须上报（比主键失败更严重：卡死的修饰键会污染
+/// 后续所有输入），调用方会丢弃实例让 Enigo 的 Drop 兜底。
+fn release_combo(enigo: &mut Enigo, main: Key, modifiers: &[Key]) -> Result<(), String> {
+    enigo
+        .key(main, Direction::Release)
+        .map_err(|e| format!("hotkey release failed: {e}"))?;
+    thread::sleep(Duration::from_millis(HOTKEY_DELAY_MS));
+
+    for m in modifiers.iter().rev() {
+        if let Err(e) = enigo.key(*m, Direction::Release) {
+            return Err(format!("release modifier failed: {e}"));
+        }
+        thread::sleep(Duration::from_millis(HOTKEY_DELAY_MS));
+    }
+    Ok(())
+}
+
+/// 注入一次组合键（kind=click）：修饰键依次按下 → 主键单击 → 修饰键逆序松开。
 ///
 /// 修饰键松开失败必须上报（比主键失败更严重：卡死的修饰键会污染
 /// 后续所有输入），Enigo 的 Drop 亦会兜底松键。
@@ -744,7 +818,13 @@ fn handle_clipboard_files(cmd: &Command) {
 }
 
 /// 处理单条指令。所有错误都转成结果 JSON，保证主循环不因单条指令退出。
-fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VPadState>) {
+/// `hold` 为当前按住中的 hotkey 注册表（kind=press 注册，主循环据此兜底）。
+fn handle_line(
+    line: &str,
+    enigo: &mut Option<Enigo>,
+    vpad: &mut Option<vpad::VPadState>,
+    hold: &mut Option<HeldCombo>,
+) {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return; // 空行直接忽略
@@ -860,6 +940,21 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VP
                 }
             };
 
+            // kind：click（缺省，兼容旧客户端）/ press / release。press+release
+            // 组成「按住」原语：press 按下后 OS 自动重复接管连发（长按退格持续
+            // 删除），release 结束；与 mouse_button 共用 parse_button_kind。
+            let dir = match cmd.kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                None => Direction::Click,
+                Some(k) => match parse_button_kind(&k.to_ascii_lowercase()) {
+                    Ok(d) => d,
+                    Err(msg) => {
+                        log_err(&msg);
+                        emit(json!({ "ok": false, "msg": msg }));
+                        return;
+                    }
+                },
+            };
+
             let instance = match ensure_enigo(enigo) {
                 Ok(e) => e,
                 Err(msg) => {
@@ -869,15 +964,60 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VP
                 }
             };
 
-            match press_combo(instance, main_key, &modifiers) {
+            let combo_label = if mod_names.is_empty() {
+                key_name.clone()
+            } else {
+                format!("{}+{}", mod_names.join("+"), key_name)
+            };
+
+            let result = match dir {
+                Direction::Press => {
+                    // 同键重复按住（异常报文/手抖连点）：先松掉旧的再按新的。
+                    // 注册表只留最新一条，不先松旧的会让更早的按键永久卡住
+                    // （只能等超时兜底）。
+                    if let Some(old) = hold.take() {
+                        let _ = release_combo(instance, old.main, &old.modifiers);
+                    }
+                    match hold_combo(instance, main_key, &modifiers) {
+                        Ok(()) => {
+                            *hold = Some(HeldCombo {
+                                main: main_key,
+                                main_name: key_name.clone(),
+                                modifiers,
+                                started: Instant::now(),
+                            });
+                            Ok(())
+                        }
+                        Err(reason) => Err(reason),
+                    }
+                }
+                Direction::Release => {
+                    // 匹配注册表：主键名一致 → 按按下时注册的修饰键集合松干净
+                    //（release 信封漏带修饰键也能完整松开）；不一致 / 注册表为空
+                    //（如引擎重启后 release 单独到达）→ 按信封盲松，多余 keyup
+                    // 无副作用。注册表不匹配时保留原注册（它仍真实按住中，
+                    // 超时兜底仍然有效）。
+                    let matched = match hold.as_ref() {
+                        Some(h) if h.main_name == key_name => Some((h.main, h.modifiers.clone())),
+                        _ => None,
+                    };
+                    let result = match &matched {
+                        Some((main, mods)) => release_combo(instance, *main, mods),
+                        None => release_combo(instance, main_key, &modifiers),
+                    };
+                    if matched.is_some() {
+                        *hold = None;
+                    }
+                    result
+                }
+                _ => press_combo(instance, main_key, &modifiers),
+            };
+
+            match result {
                 Ok(()) => emit(json!({
                     "ok": true,
                     "msg": "hotkey complete",
-                    "combo": if mod_names.is_empty() {
-                        key_name
-                    } else {
-                        format!("{}+{}", mod_names.join("+"), key_name)
-                    }
+                    "combo": combo_label
                 })),
                 Err(reason) => {
                     log_err(&reason);
@@ -1020,9 +1160,11 @@ fn handle_line(line: &str, enigo: &mut Option<Enigo>, vpad: &mut Option<vpad::VP
         "set_clipboard_image" => handle_clipboard_image(&cmd),
         "set_clipboard_files" => handle_clipboard_files(&cmd),
         "ping" => {
-            // 心跳指令：仅用于 Node 侧判断子进程是否卡死。
+            // 心跳指令：仅用于 Node 侧判断子进程是否卡死。proto 告知协议代数：
+            // 2 = hotkey 支持 kind 按住原语；旧引擎无此字段（按 1 处理），
+            // Node 客户端据此把 press 降级为单击、release 跳过。
             // 注意：这里不构造 Enigo，避免在无图形环境下心跳也失败。
-            emit(json!({ "ok": true, "msg": "pong" }));
+            emit(json!({ "ok": true, "msg": "pong", "proto": 2 }));
         }
         "focus" => {
             // 旧版焦点轮询指令的兼容保留：v0.4.0 客户端不再调用此 action，
@@ -1076,24 +1218,71 @@ fn main() {
     let running = Arc::new(AtomicBool::new(true));
     install_signal_handlers(running.clone());
 
-    let stdin = io::stdin();
-    let reader = stdin.lock();
+    // stdin 阻塞读搬进独立线程，主循环用带超时的 channel 收行：
+    // 按住中的 hotkey（kind=press）在没有新指令时也能被超时兜底检查到，
+    // 退出信号的响应延迟也从「下一条指令到达时」收紧到 HOLD_POLL_MS。
+    let (line_tx, line_rx) = mpsc::channel::<Option<String>>();
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let send = match line {
+                Ok(l) => line_tx.send(Some(l)),
+                Err(_) => line_tx.send(None), // 读错误 ≈ 管道关闭，通知主循环退出
+            };
+            if send.is_err() {
+                break; // 主循环已退出
+            }
+        }
+        // 正常 EOF（父进程关闭管道）也通知主循环退出
+        let _ = line_tx.send(None);
+    });
 
     log_err("input-agent started, waiting for commands on stdin");
 
     let mut enigo: Option<Enigo> = None;
     let mut vpad: Option<vpad::VPadState> = None;
+    // 按住中的 hotkey 注册表：kind=press 注册、release 注销，
+    // 超时兜底（手机断线收不到 release 时强制松开，防 OS 无限重复按键）。
+    let mut hold: Option<HeldCombo> = None;
 
-    for line in reader.lines() {
+    loop {
         if !running.load(Ordering::SeqCst) {
             log_err("termination signal received, exiting");
             break;
         }
-        match line {
-            Ok(l) => handle_line(&l, &mut enigo, &mut vpad),
-            Err(e) => {
-                // stdin 读错误通常意味着父进程已关闭管道，直接退出。
-                log_err(&format!("stdin read error: {e}"));
+
+        // 按住超时兜底：先取出注册再松，松开失败（底层连接已坏）才丢实例，
+        // Drop 兜底松键；实例本就不可用（上一条指令失败已置 None）时
+        // 注册表清掉即可——新指令会重建实例。
+        let expired = hold
+            .as_ref()
+            .is_some_and(|h| h.started.elapsed() >= Duration::from_millis(HOTKEY_HOLD_TIMEOUT_MS));
+        if expired {
+            log_err(&format!(
+                "hotkey hold exceeded {HOTKEY_HOLD_TIMEOUT_MS}ms without release, auto-releasing"
+            ));
+            let held = hold.take();
+            let mut release_failed = false;
+            if let (Some(instance), Some(h)) = (enigo.as_mut(), held.as_ref()) {
+                if release_combo(instance, h.main, &h.modifiers).is_err() {
+                    release_failed = true;
+                }
+            }
+            if release_failed {
+                enigo = None;
+            }
+        }
+
+        match line_rx.recv_timeout(Duration::from_millis(HOLD_POLL_MS)) {
+            Ok(Some(l)) => handle_line(&l, &mut enigo, &mut vpad, &mut hold),
+            Ok(None) => {
+                log_err("stdin closed, exiting");
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // reader 线程异常消亡（且未发出 EOF 哨兵）：无法再收指令，退出
+                log_err("stdin reader gone, exiting");
                 break;
             }
         }
@@ -1221,6 +1410,30 @@ mod tests {
         assert_eq!(parse_modifier_name("option"), Ok(Key::Alt));
         assert_eq!(parse_modifier_name("win"), Ok(Key::Meta));
         assert_eq!(parse_modifier_name("cmd"), Ok(Key::Meta));
+    }
+
+    #[test]
+    fn hotkey_kind_defaults_to_click_when_absent() {
+        // 缺省（旧客户端报文）：kind 缺失 → hotkey 分支按 Click 处理
+        let cmd: Command =
+            serde_json::from_str(r#"{"action":"hotkey","key":"backspace"}"#).expect("parse ok");
+        assert_eq!(cmd.kind, None);
+    }
+
+    #[test]
+    fn hotkey_kind_parses_press_and_release() {
+        // 与 mouse_button 共用同一动作白名单（click/press/release）
+        for raw in ["press", "release", "click"] {
+            let payload = format!(r#"{{"action":"hotkey","key":"backspace","kind":"{raw}"}}"#);
+            let cmd: Command = serde_json::from_str(&payload).expect("parse ok");
+            assert_eq!(cmd.kind.as_deref(), Some(raw), "kind={raw}");
+            assert!(parse_button_kind(raw).is_ok(), "kind={raw} 应过白名单");
+        }
+        // 大小写归一在 handle_line 内做：这里确认原值原样进结构体
+        let cmd: Command =
+            serde_json::from_str(r#"{"action":"hotkey","key":"backspace","kind":"PRESS"}"#)
+                .expect("parse ok");
+        assert_eq!(cmd.kind.as_deref(), Some("PRESS"));
     }
 
     #[test]

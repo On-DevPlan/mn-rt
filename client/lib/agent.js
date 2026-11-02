@@ -53,6 +53,10 @@ class AgentManager {
     this.lastStartAt = 0;
     this.heartbeatTimer = null;
     this.restartTimer = null;
+    // 引擎协议代数：1 = 无 kind 支持（hotkey 只有单击），2+ = 支持
+    // kind=press/release「按住」原语。启动探测 + 心跳持续刷新；
+    // 探测未回来前按 1 处理（宁可降级，不赌新特性）。
+    this.proto = 1;
 
     this._stdoutBuffer = '';
     /** 等待中的请求：FIFO，子进程按序应答，因此队首即当前请求 */
@@ -133,6 +137,16 @@ class AgentManager {
 
     this.state = STATE.READY;
     this._startHeartbeat();
+
+    // 协议能力探测：proto ≥2 的引擎会在 ping 应答里带 proto 字段。
+    // 旧引擎无该字段 → 保持 proto=1，hotkey 的 press/release 自动降级
+    // （见 hotkey()）。失败静默：失败只意味着这次没探到，心跳会继续刷新。
+    this._send({ action: 'ping' }, 5000)
+      .then((res) => {
+        this.proto = Number.isFinite(res?.proto) ? res.proto : 1;
+        this.logger?.debug('input-agent protocol probed', { proto: this.proto });
+      })
+      .catch(() => {});
     return this.child;
   }
 
@@ -385,9 +399,27 @@ class AgentManager {
    *                              space / up / down / left / right / home / end /
    *                              pageup / pagedown / insert / f1-f12 / 单字符（a、5…）
    * @param {string[]} [modifiers] 修饰键：shift / ctrl / alt / meta（含别名 option、cmd、win、super）
+   * @param {number} [timeoutMs]
+   * @param {string} [kind]       click（缺省）/ press / release。press + release
+   *                              组成「按住」原语：press 按下后由 OS 键盘自动重复
+   *                              接管连发（重复延迟/重复率走系统设置，与真实按住
+   *                              手感一致），release 结束。引擎侧有 20s 超时兜底，
+   *                              release 因断线未送达时由兜底松键。旧引擎
+   *                              （proto<2，ping 应答无 proto 字段）不支持 kind：
+   *                              press 降级为单击、release 跳过——保持旧版
+   *                              「一击一键」行为，避免 press/release 都落成
+   *                              click 的双发。
    */
-  async hotkey(key, modifiers = [], timeoutMs) {
-    return this.send({ action: 'hotkey', key, modifiers }, timeoutMs);
+  async hotkey(key, modifiers = [], timeoutMs, kind = 'click') {
+    if (this.proto < 2) {
+      if (kind === 'release') {
+        return { ok: true, msg: 'release skipped: legacy engine without kind support' };
+      }
+      if (kind === 'press') kind = 'click';
+    }
+    const payload = { action: 'hotkey', key, modifiers };
+    if (kind && kind !== 'click') payload.kind = kind;
+    return this.send(payload, timeoutMs);
   }
 
   /** 便捷方法：向焦点输入框发送 N 次退格。`expectFocus` 同上：漂移时拒退格。 */

@@ -590,9 +590,10 @@ test('align：commit 后发 ACK 信封（方向 c2p，手机可解）', () => {
 // ---- 快捷键指令（v0.5.4+）----
 
 /** 以手机身份密封一条快捷键指令（与 sealedSync 同链路，明文带 hotkey 字段）。 */
-function sealedHotkey(align, keys, seq, sid = 's1', phoneId = 'phone-e2e') {
+function sealedHotkey(align, keys, seq, sid = 's1', phoneId = 'phone-e2e', kind) {
   const { seal, buildAad } = require('../lib/rt-crypto');
   const plain = { hotkey: keys, ts: 0, phoneId };
+  if (kind) plain.kind = kind;
   return JSON.stringify(
     seal(align.keyPhoneToPc, buildAad(align.room, 'p2c', seq), plain, { sid, seq }),
   );
@@ -619,6 +620,26 @@ test('align：hotkey 重复 seq 不去重（事件语义，重复点击应重复
   align.handleIncoming(sealedHotkey(align, ['win', 'r'], 1));
   assert.strictEqual(ops.length, 2);
   assert.deepStrictEqual(ops.map((o) => o.op), ['hotkey', 'hotkey']);
+});
+
+test('align：hotkey kind 透传（按住原语），缺省补 click', () => {
+  const { align, ops } = newTestAlign(vectors.input_key);
+  // press / release 原样透传——上层靠这两条驱动引擎按住/松开
+  align.handleIncoming(sealedHotkey(align, ['backspace'], 1, 's1', 'phone-e2e', 'press'));
+  align.handleIncoming(sealedHotkey(align, ['backspace'], 2, 's1', 'phone-e2e', 'release'));
+  assert.strictEqual(ops[0].kind, 'press');
+  assert.strictEqual(ops[1].kind, 'release');
+  // 旧手机端不携带 kind → op 里补缺省 click
+  align.handleIncoming(sealedHotkey(align, ['win', 'r'], 3));
+  assert.strictEqual(ops[2].kind, 'click');
+});
+
+test('align：hotkey 非法 kind 丢弃（白名单防垃圾流向 agent）', () => {
+  const { align, ops, acks } = newTestAlign(vectors.input_key);
+  align.handleIncoming(sealedHotkey(align, ['backspace'], 1, 's1', 'phone-e2e', 'HOLD'));
+  assert.strictEqual(align.stats.envelopesBad, 1);
+  assert.deepStrictEqual(ops, []);
+  assert.strictEqual(acks.length, 0); // 丢弃 = 不 ACK，手机端不误以为受理
 });
 
 test('align：hotkey 与 text 快照互不干扰', () => {

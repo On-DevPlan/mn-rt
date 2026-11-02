@@ -306,13 +306,27 @@ class RtAlignSession extends EventEmitter {
     // 之前处理——重复点击应该重复生效，且不得碰快照状态机（不更新
     // lastSyncSid / desiredSeq / desiredText，不设 busy、不进 _dispatch）。
     // 协议：hotkey 数组末位是主键、其余是修饰键（['win','r'] = Win+R）。
+    // kind（v0.9.3+ 按住原语）：click（缺省，旧手机端不携带）/ press / release
+    // ——press+release 两段式组成「按住」，PC 端引擎由 OS 自动重复接管连发。
+    // 与 mouse 载荷同款白名单：垃圾 kind 在这里丢弃，绝不流向 rust agent。
     if (Array.isArray(plain.hotkey) && plain.hotkey.length > 0) {
       const main = String(plain.hotkey[plain.hotkey.length - 1]);
       const modifiers = plain.hotkey.slice(0, -1).map(String);
+      let kind = 'click';
+      if (plain.kind !== undefined && plain.kind !== null) {
+        const k = String(plain.kind).toLowerCase();
+        if (k === 'click' || k === 'press' || k === 'release') {
+          kind = k;
+        } else {
+          this.stats.envelopesBad += 1;
+          this.logger?.warn('align 丢弃非法 hotkey kind', { seq, kind: String(plain.kind) });
+          return 'duplicate';
+        }
+      }
       this.phoneId = typeof plain.phoneId === 'string' ? plain.phoneId : '';
       this.stats.envelopesOk += 1;
       this._sendAck(seq); // 直接回「已受理」：无按键计划需要 commit
-      this.emit('op', { op: 'hotkey', key: main, modifiers, seq });
+      this.emit('op', { op: 'hotkey', key: main, modifiers, kind, seq });
       return 'envelope';
     }
 
