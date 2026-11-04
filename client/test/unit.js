@@ -19,6 +19,7 @@ const { MessageQueue } = require('../lib/queue');
 const platform = require('../lib/platform');
 const { parseArgs, resolveEnterMode } = require('../lib/config');
 const { VPadClient } = require('../lib/vpad');
+const { VpadPump } = require('../lib/vpad-pump');
 
 let pass = 0;
 let fail = 0;
@@ -1240,6 +1241,160 @@ test('VPadClient：高频 axisNow 100 次 → stats.axes == 100，rust 也收到
   assert.strictEqual(sent[0].action, 'vpad_init');
   assert.strictEqual(sent.filter((p) => p.action === 'vpad_axis').length, 100);
   assert.strictEqual(v.stats.axes, 100);
+});
+
+test('VpadPump：串行保序——混发 dpad/button/axis 按 dispatch 顺序到达 agent', async () => {
+  const sent = [];
+  const pump = new VpadPump({
+    send: (p) => {
+      sent.push(p);
+      return Promise.resolve({ ok: true });
+    },
+  });
+  pump.dispatch({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'left' }, 1);
+  pump.dispatch({ action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: true }, 2);
+  pump.dispatch({ action: 'vpad_axis', vpad_handle: 'pad1', vpad_axis: 'lx', vpad_value: 0.5 }, 3);
+  await pump.idle();
+  assert.deepStrictEqual(
+    sent.map((p) => p.action),
+    ['vpad_dpad', 'vpad_button', 'vpad_axis'],
+  );
+  assert.strictEqual(pump.stats.sent, 3);
+  assert.strictEqual(pump.stats.failed, 0);
+});
+
+test('VpadPump：unknown-handle 自愈——dpad 撞空句柄后 release_all+init 重建并重放成功', async () => {
+  const sent = [];
+  const records = [];
+  let agentHasPad = false; // 模拟 agent 重启后 rust handles 表已空
+  const pump = new VpadPump({
+    send: (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') {
+        agentHasPad = true;
+        return Promise.resolve({ ok: true, handle: 'pad1', slot: 1 });
+      }
+      if (p.action === 'vpad_release_all') {
+        agentHasPad = false;
+        return Promise.resolve({ ok: true });
+      }
+      if (p.action === 'vpad_dpad') {
+        return agentHasPad
+          ? Promise.resolve({ ok: true, msg: 'vpad dpad complete' })
+          : Promise.resolve({ ok: false, msg: 'unknown handle: pad1' });
+      }
+      return Promise.resolve({ ok: true });
+    },
+    record: (e) => records.push(e),
+    logger: { info: () => {}, warn: () => {}, debug: () => {} },
+  });
+  pump.dispatch({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'left' }, 1);
+  await pump.idle();
+  assert.deepStrictEqual(
+    sent.map((p) => p.action),
+    ['vpad_dpad', 'vpad_release_all', 'vpad_init', 'vpad_dpad'],
+  );
+  assert.strictEqual(pump.stats.healed, 1);
+  assert.strictEqual(pump.stats.sent, 1);
+  assert.strictEqual(pump.stats.failed, 0);
+  assert.strictEqual(records.length, 1);
+  assert.strictEqual(records[0].status, 'vpad_sent');
+});
+
+test('VpadPump：release 自身撞 unknown-handle 不触发自愈（否则凭空造出手柄）', async () => {
+  const sent = [];
+  const pump = new VpadPump({
+    send: (p) => {
+      sent.push(p);
+      return Promise.resolve({ ok: false, msg: 'unknown handle: pad1' });
+    },
+  });
+  pump.dispatch({ action: 'vpad_release', vpad_handle: 'pad1' }, 1);
+  await pump.idle();
+  assert.deepStrictEqual(sent.map((p) => p.action), ['vpad_release']);
+  assert.strictEqual(pump.stats.healed, 0);
+  assert.strictEqual(pump.stats.failed, 1);
+});
+
+test('VpadPump：自愈失败（init 被拒）按原失败上报，不无限重试', async () => {
+  const sent = [];
+  const records = [];
+  const pump = new VpadPump({
+    send: (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') return Promise.resolve({ ok: false, msg: 'connect failed' });
+      if (p.action === 'vpad_button') return Promise.resolve({ ok: false, msg: 'unknown handle: pad1' });
+      return Promise.resolve({ ok: true });
+    },
+    record: (e) => records.push(e),
+  });
+  pump.dispatch({ action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: true }, 1);
+  await pump.idle();
+  assert.deepStrictEqual(
+    sent.map((p) => p.action),
+    ['vpad_button', 'vpad_release_all', 'vpad_init'],
+  );
+  assert.strictEqual(records[0].status, 'vpad_failed');
+  assert.strictEqual(records[0].errorMsg, 'unknown handle: pad1');
+  assert.strictEqual(pump.stats.sent, 0);
+  assert.strictEqual(pump.stats.failed, 1);
+});
+
+test('VpadPump：init 应答句柄被学习，后续命令重写到真实句柄', async () => {
+  const sent = [];
+  const pump = new VpadPump({
+    send: (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') return Promise.resolve({ ok: true, handle: 'pad2', slot: 1 });
+      return Promise.resolve({ ok: true });
+    },
+  });
+  pump.dispatch({ action: 'vpad_init', vpad_slot: 1 }, 1);
+  pump.dispatch({ action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: true }, 2);
+  await pump.idle();
+  const button = sent.find((p) => p.action === 'vpad_button');
+  assert.strictEqual(button.vpad_handle, 'pad2');
+});
+
+test('VpadPump：release 成功后句柄学习清空，命令恢复透传手机端写的句柄', async () => {
+  const sent = [];
+  const pump = new VpadPump({
+    send: (p) => {
+      sent.push(p);
+      if (p.action === 'vpad_init') return Promise.resolve({ ok: true, handle: 'pad2', slot: 1 });
+      return Promise.resolve({ ok: true });
+    },
+  });
+  pump.dispatch({ action: 'vpad_init', vpad_slot: 1 }, 1);
+  pump.dispatch({ action: 'vpad_release', vpad_handle: 'pad2' }, 2);
+  pump.dispatch({ action: 'vpad_button', vpad_handle: 'pad1', vpad_button: 'a', vpad_value_bool: true }, 3);
+  await pump.idle();
+  const last = sent[sent.length - 1];
+  assert.strictEqual(last.action, 'vpad_button');
+  assert.strictEqual(last.vpad_handle, 'pad1');
+});
+
+test('VpadPump：agent.send reject 不炸链——后续指令继续执行', async () => {
+  const sent = [];
+  const records = [];
+  let broken = true;
+  const pump = new VpadPump({
+    send: (p) => {
+      sent.push(p);
+      if (broken) return Promise.reject(new Error('write after end'));
+      return Promise.resolve({ ok: true });
+    },
+    record: (e) => records.push(e),
+  });
+  pump.dispatch({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'left' }, 1);
+  await pump.idle();
+  broken = false;
+  pump.dispatch({ action: 'vpad_dpad', vpad_handle: 'pad1', vpad_dir: 'none' }, 2);
+  await pump.idle();
+  assert.strictEqual(records[0].status, 'vpad_failed');
+  assert.strictEqual(records[0].errorMsg, 'write after end');
+  assert.strictEqual(records[1].status, 'vpad_sent');
+  assert.strictEqual(pump.stats.sent, 1);
 });
 
 test('align：发送模式 Enter 提交后 mirror 归零（目标框已随消息清空）', () => {

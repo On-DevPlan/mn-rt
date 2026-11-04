@@ -31,6 +31,7 @@ const { MessageQueue } = require('../lib/queue');
 const { ServeClient } = require('../lib/ws-client');
 const { RtAlignSession, looksLikeEnvelope } = require('../lib/rt-align');
 const { MousePump } = require('../lib/mouse');
+const { VpadPump } = require('../lib/vpad-pump');
 const rtCrypto = require('../lib/rt-crypto');
 const { LocalStore } = require('../lib/store');
 const { Logger } = require('../lib/logger');
@@ -722,47 +723,14 @@ async function cmdServe(cfg, flags = {}) {
   });
 
   // 虚拟手柄指令泵（vpad_*）：专用串行 Promise 链直通 agent——按键
-  // press/release 必须保序且不丢（丢 release = 手柄键卡死），当前控制面
-  // （按钮/扳机/十字键）都是低频状态型指令，串行链足够；与文本注入的
-  // 共享队列分离，互不拖延迟。轴流（摇杆 60Hz）接入时再评估合批直通。
-  let vpadChain = Promise.resolve();
-  // 引擎分配的句柄名未必等于手机端写的 vpad_handle：rust 端 next_index 单调
-  // 自增，且 release_all 清表时计数器不复位 → 第二次 init 拿到 pad2/pad3…，
-  // 而手机端把句柄写死 pad1（fr rt_page.dart 的 _vpadHandle，依赖「release_all
-  // → init 必得 pad1」这条契约）。结果是 init 成功、后续按钮/十字键全撞
-  // "unknown handle: pad1"。这里记住 init 应答里的真实句柄，后续命令一律
-  // 重写到它；release 成功后清空，下次 init 重新学。
-  let vpadHandle = null;
-  const dispatchVpad = (cmd, seq) => {
-    vpadChain = vpadChain.then(async () => {
-      try {
-        const payload = vpadHandle && cmd.vpad_handle
-          ? { ...cmd, vpad_handle: vpadHandle }
-          : cmd;
-        const res = await agent.send(payload);
-        if (res?.ok) {
-          if (cmd.action === 'vpad_init' && res.handle) vpadHandle = res.handle;
-          if (cmd.action === 'vpad_release' || cmd.action === 'vpad_release_all') {
-            vpadHandle = null;
-          }
-          // vpad 全链路成功时此前零 console 输出（store 只落盘不打印），
-          // 排障时无法区分「没收到」和「收到了但静默」。init / release 是
-          // 一次性节点走 info（「手柄已插上/拔下」一眼可见）；按键/轴/扳机
-          // 高频走 debug，避免游戏时刷屏。
-          const log = (cmd.action === 'vpad_init' || cmd.action === 'vpad_release')
-            ? 'info' : 'debug';
-          logger[log]('vpad 指令成功', { action: cmd.action, msg: res?.msg, seq });
-          store.append({ status: 'vpad_sent', action: cmd.action, source: 'align', seq });
-        } else {
-          logger.warn('vpad 指令失败', { action: cmd.action, msg: res?.msg, seq });
-          store.append({ status: 'vpad_failed', action: cmd.action, errorMsg: res?.msg ?? 'unknown', source: 'align', seq });
-        }
-      } catch (e) {
-        logger.warn('vpad 指令异常', { action: cmd.action, error: e.message, seq });
-        store.append({ status: 'vpad_failed', action: cmd.action, errorMsg: e.message, source: 'align', seq });
-      }
-    });
-  };
+  // press/release 必须保序且不丢（丢 release = 手柄键卡死），与文本注入的
+  // 共享队列分离，互不拖延迟。unknown-handle 自愈（agent 重启 / 手机端
+  // 生命周期把 pad1 release 掉后不再永久失灵）见 lib/vpad-pump.js 头注释。
+  const vpadPump = new VpadPump({
+    send: (payload) => agent.send(payload),
+    logger,
+    record: (entry) => store.append(entry),
+  });
 
   // 图片/文件泵（文件模块 v0.8.0 拍照 / v0.9.0 上传文件 / v0.9.2 PNG）：绕过串行队列——
   // 写剪贴板可能耗数百毫秒（10MB 图的解码），不能卡住打字。同一时刻
@@ -1053,7 +1021,7 @@ async function cmdServe(cfg, flags = {}) {
       }
       // 虚拟手柄指令（v0.7.0+）：专用串行链，保序不丢，不进文本共享队列。
       if (op.op === 'vpad') {
-        dispatchVpad(op.cmd, op.seq);
+        vpadPump.dispatch(op.cmd, op.seq);
         return;
       }
       // 图片完成（v0.8.0+ 文件模块）：同样绕过串行队列，见 imagePump 注释

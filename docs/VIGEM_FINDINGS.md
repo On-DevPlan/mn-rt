@@ -109,6 +109,42 @@ Node 侧 `agent.js:368` 的 `child.stdin.end()` 已经实现了优雅 shutdown�
 让 Node 端能「无论哪种平台 vpad_status 都能拿到一个 ok:true 的 response」，
 方便上层做能力探测。其他 vpad_* action 返 `vpad requires Windows` 错误。
 
+### 6. 句柄生命周期：rust 端 handles 表与手机端手里的句柄名会脱钩（v0.9.4）
+
+**现象**：手机端游戏时十字键的左右方向偶发「按了没反应」，整个虚拟手柄
+同时失灵（按钮/扳机一起死），退出画布重进或重连后恢复。**不是按键判定
+的问题**——是句柄脱钩：rust 端 `VPadStateInner.handles` 里没有手机端命令
+带的那个句柄名，此后每条 vpad 指令都撞 `unknown handle: pad1`。
+
+本机 `~/.nx-rt/data/records.jsonl` 实证（2026-10-24 16:01–16:02）：
+
+```text
+16:01:51.507  vpad_sent   vpad_release      ← 有人把 pad1 释放了
+16:01:53.913  vpad_failed vpad_dpad  unknown handle: pad1   ← 之后连续 16s 全灭
+16:02:23.003  vpad_sent   vpad_release_all  ← 手机重新 bootstrap
+16:02:23.009  vpad_sent   vpad_init         ← 句柄回来了，恢复正常
+```
+
+**三条脱钩路径**（都能单独触发「有时失灵」）：
+
+1. **PC 端 agent / 引擎重启**：新进程句柄表为空；手机端的初始化链
+   （`_vpadReady`）仍是一条「已完成」的 Future，不会重新 init。
+2. **手机端任一页面实例退出画布**：退出路径会 `vpad_release pad1`——同一台
+   PC 只有一份虚拟手柄，托管会话被另一个页面实例共享时，一个实例退出即
+   打死另一个实例手里的手柄。
+3. **手机端初始化链自身失败**（引擎未起 / WS 抖动瞬间）：失败被缓存成
+   「已完成」，此后每条指令裸发。
+
+**为什么在引擎侧修**：手机端的初始化链是「跨页面生命周期 + 跨连接」的
+隐式状态，任何一条漏网路径都会复现；引擎是权威层，在链内检测
+`unknown handle` 并自动 `release_all + init` 重建句柄、重放原指令一次，
+可一次性覆盖全部三条路径，且不依赖手机端同步升级。手机端另做加固
+（初始化链失败不缓存、重连/接管后重置链）作纵深防御。
+
+**自愈的边界**：`init` / `release` / `release_all` 自身的 unknown-handle
+**不**触发自愈——释放路径没有可重建的东西，自愈反而会凭空造出一个没人
+release 的幽灵手柄（见本文件「不预建手柄」那条设计要点）。
+
 ## 实测环境
 
 | 平台 | rust target | 状态 |
